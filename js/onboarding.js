@@ -714,12 +714,11 @@ function renderAnniversariesList() {
         const formattedDays = diffDays.toLocaleString('zh-CN');
 
         const html = `
-            <div class="ann-item-card ${typeClass}" data-ann-id="${ann.id}" onclick="selectAnnCard(${ann.id})" style="cursor:pointer;">
+            <div class="ann-item-card ${typeClass}" data-ann-id="${ann.id}" onclick="selectAnnCard(${ann.id})" style="cursor:pointer;" title="起始日：${ann.date}">
                 <div class="ann-item-left">
-                    <div class="ann-item-name">${ann.name}</div>
-                    <div class="ann-item-date">
+                    <div class="ann-item-name">
+                        ${ann.name}
                         <span class="ann-tag">${typeLabel}</span>
-                        ${ann.date}
                     </div>
                 </div>
                 <div style="display:flex; align-items:center;">

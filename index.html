@@ -1501,6 +1501,9 @@
                 <button class="view-switch-btn" id="btn-view-stats">
                     <i class="fas fa-chart-pie"></i> 统计
                 </button>
+                <button class="view-switch-btn" id="btn-view-trash">
+                    <i class="fas fa-recycle"></i> 回收站
+                </button>
             </div>
         </div>
         <div id="mood-calendar-view" class="mood-view-section">
@@ -1519,8 +1522,15 @@
             <div id="mood-stats-container" class="mood-stats-card" style="border:none; box-shadow:none; padding:0; background:transparent;">
             </div>
         </div>
+
+        <div id="mood-trash-view" class="mood-view-section hidden-view">
+            <div id="mood-trash-list" style="padding:0 14px;"></div>
+        </div>
     
         <div class="modal-buttons">
+            <button class="modal-btn modal-btn-secondary" id="mood-export-btn" style="flex:1;">导出</button>
+            <button class="modal-btn modal-btn-secondary" id="mood-import-btn" style="flex:1;">导入</button>
+            <input type="file" id="mood-import-file-input" accept="application/json" style="display:none;">
             <button class="modal-btn modal-btn-secondary" id="close-mood">关闭</button>
         </div>
        </div>

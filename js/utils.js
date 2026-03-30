@@ -120,18 +120,59 @@ function deduplicateContentArray(arr, baseSystemArray = []) {
                     return;
                 }
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                const oscillator = audioContext.createOscillator();
                 const gainNode = audioContext.createGain();
-                oscillator.connect(gainNode); gainNode.connect(audioContext.destination);
-                oscillator.type = 'sine';
-                const vol = Math.min(0.5, Math.max(0.01, settings.soundVolume || 0.1));
-                gainNode.gain.setValueAtTime(vol, audioContext.currentTime);
-                if (type === 'send') oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
-                else if (type === 'favorite') oscillator.frequency.setValueAtTime(1200, audioContext.currentTime);
-                else oscillator.frequency.setValueAtTime(600, audioContext.currentTime);
-                oscillator.start();
-                gainNode.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.15);
-                oscillator.stop(audioContext.currentTime + 0.15);
+                const vol = Math.min(0.55, Math.max(0.01, settings.soundVolume || 0.1));
+
+                // 叠加一层泛音让音色更“厚”
+                const osc1 = audioContext.createOscillator();
+                const osc2 = audioContext.createOscillator();
+
+                osc1.connect(gainNode);
+                osc2.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+
+                const now = audioContext.currentTime;
+                gainNode.gain.setValueAtTime(vol, now);
+
+                const cfg = (() => {
+                    // freq 为起始频率，duration 为总时长
+                    if (type === 'send') return { osc1Type: 'sine', osc2Type: 'triangle', freq: 820, dur: 0.16, up: 1.08, down: 0.65 };
+                    if (type === 'favorite') return { osc1Type: 'sine', osc2Type: 'sine', freq: 1200, dur: 0.18, up: 1.06, down: 0.70 };
+                    if (type === 'message') return { osc1Type: 'sine', osc2Type: 'triangle', freq: 620, dur: 0.17, up: 1.05, down: 0.62 };
+                    if (type === 'poke') return { osc1Type: 'triangle', osc2Type: 'sine', freq: 540, dur: 0.14, up: 1.18, down: 0.68 };
+                    if (type === 'anniversary') return { osc1Type: 'sawtooth', osc2Type: 'triangle', freq: 660, dur: 0.22, up: 1.10, down: 0.62 };
+                    if (type === 'mood') return { osc1Type: 'sine', osc2Type: 'square', freq: 440, dur: 0.16, up: 1.12, down: 0.60 };
+                    if (type === 'import') return { osc1Type: 'square', osc2Type: 'triangle', freq: 330, dur: 0.16, up: 1.25, down: 0.70 };
+                    if (type === 'export') return { osc1Type: 'triangle', osc2Type: 'sine', freq: 520, dur: 0.16, up: 1.15, down: 0.66 };
+                    if (type === 'error') return { osc1Type: 'sawtooth', osc2Type: 'square', freq: 180, dur: 0.14, up: 1.03, down: 0.42 };
+                    return { osc1Type: 'sine', osc2Type: 'triangle', freq: 600, dur: 0.15, up: 1.05, down: 0.60 };
+                })();
+
+                const jitter = (Math.random() - 0.5) * 0.02; // 轻微随机
+                const f1 = cfg.freq * (1 + jitter);
+                const f2 = f1 * 2;
+
+                osc1.type = cfg.osc1Type;
+                osc2.type = cfg.osc2Type;
+
+                osc1.frequency.setValueAtTime(f1, now);
+                osc2.frequency.setValueAtTime(f2, now);
+
+                // 频率滑动 + 音量包络
+                osc1.frequency.exponentialRampToValueAtTime(f1 * cfg.up, now + 0.04);
+                osc2.frequency.exponentialRampToValueAtTime(f2 * (cfg.up - 0.03), now + 0.04);
+
+                osc1.frequency.exponentialRampToValueAtTime(f1 * cfg.down, now + cfg.dur);
+                osc2.frequency.exponentialRampToValueAtTime(f2 * cfg.down, now + cfg.dur);
+
+                const end = now + cfg.dur;
+                osc1.start(now);
+                osc2.start(now);
+
+                gainNode.gain.exponentialRampToValueAtTime(0.0001, end);
+
+                osc1.stop(end);
+                osc2.stop(end);
             } catch (e) { console.warn("音频播放失败:", e); }
         };
 
@@ -261,19 +302,115 @@ async function importAllData(file) {
                 if (typeof importChatHistory === 'function') importChatHistory(file);
                 return;
             }
-            if (!confirm('全量恢复将覆盖所有现有数据，确认继续？')) return;
+            const categories = [
+                {
+                    id: 'chat',
+                    label: '聊天记录/会话',
+                    indexedDBNeedles: ['chatMessages', 'sessionList', 'chatSettings'],
+                    localStorageNeedles: []
+                },
+                {
+                    id: 'replies',
+                    label: '回复/拍一拍/氛围',
+                    indexedDBNeedles: ['customReplies', 'customPokes', 'customStatuses', 'customMottos', 'customIntros', 'customEmojis', 'customReplyGroups'],
+                    localStorageNeedles: ['disabledReplyItems', 'pokeSym_my', 'pokeSym_partner', 'pokeSym_my_custom', 'pokeSym_partner_custom']
+                },
+                {
+                    id: 'stickers',
+                    label: '表情库(贴纸)',
+                    indexedDBNeedles: ['stickerLibrary'],
+                    localStorageNeedles: ['disabledStickerItems']
+                },
+                {
+                    id: 'ann',
+                    label: '纪念日',
+                    indexedDBNeedles: ['anniversaries'],
+                    localStorageNeedles: []
+                },
+                {
+                    id: 'mood',
+                    label: '心晴手账',
+                    indexedDBNeedles: ['moodCalendar', 'customMoodOptions', 'moodTrash'],
+                    localStorageNeedles: []
+                },
+                {
+                    id: 'themes',
+                    label: '主题与外观',
+                    indexedDBNeedles: ['customThemes', 'themeSchemes', 'backgroundGallery', 'chatBackground', 'partnerAvatar', 'myAvatar', 'partnerPersonas'],
+                    localStorageNeedles: []
+                }
+            ];
+
+            const pickSelected = () => new Promise((resolve) => {
+                const overlay = document.createElement('div');
+                overlay.style.cssText = `
+                    position:fixed;inset:0;z-index:999999;background:rgba(0,0,0,0.6);
+                    backdrop-filter:blur(10px);display:flex;align-items:flex-end;justify-content:center;
+                `;
+                overlay.innerHTML = `
+                    <div style="
+                        width:100%;max-width:560px;background:var(--secondary-bg);border-radius:24px 24px 0 0;
+                        box-shadow:0 -10px 60px rgba(0,0,0,0.3);
+                        padding:16px 18px env(safe-area-inset-bottom,0);
+                    ">
+                        <div style="width:36px;height:4px;border-radius:2px;background:var(--border-color);margin:0 auto 14px;"></div>
+                        <div style="font-size:16px;font-weight:800;color:var(--text-primary);margin-bottom:10px;">全量恢复：选择要导入的部分</div>
+                        <div style="display:flex;flex-direction:column;gap:10px;max-height:60vh;overflow:auto;padding-right:6px;">
+                            ${categories.map(c => {
+                                return `
+                                    <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 12px;border:1.5px solid var(--border-color);border-radius:16px;background:var(--primary-bg);">
+                                        <span style="font-size:13px;font-weight:700;color:var(--text-primary);">${c.label}</span>
+                                        <input type="checkbox" data-cat="${c.id}" checked style="transform:scale(1.1);accent-color:var(--accent-color);">
+                                    </label>
+                                `;
+                            }).join('')}
+                        </div>
+                        <div style="display:flex;gap:10px;margin-top:14px;">
+                            <button id="full-imp-cancel" class="modal-btn modal-btn-secondary" style="flex:1;padding:12px 0;">取消</button>
+                            <button id="full-imp-confirm" class="modal-btn modal-btn-primary" style="flex:1;padding:12px 0;">确认恢复</button>
+                        </div>
+                    </div>
+                `;
+                overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); resolve(null); });
+                document.getElementById('full-imp-cancel').onclick = () => { overlay.remove(); resolve(null); };
+                document.getElementById('full-imp-confirm').onclick = () => {
+                    const selected = Array.from(overlay.querySelectorAll('input[type=checkbox]:checked'))
+                        .map(i => i.dataset.cat);
+                    overlay.remove();
+                    resolve(selected);
+                };
+                document.body.appendChild(overlay);
+            });
+
+            const selectedCats = await pickSelected();
+            if (!selectedCats || selectedCats.length === 0) return;
+
+            const matchAnyNeedles = (key, needles) => needles.some(n => key && key.includes(n));
+
             showNotification('正在恢复数据…', 'info', 3000);
+
+            const indexedDB = data.indexedDB || {};
+            const localStorageData = data.localStorage || {};
+
+            const selectedCategories = categories.filter(c => selectedCats.includes(c.id));
+
             if (data.indexedDB) {
-                for (const [k, v] of Object.entries(data.indexedDB)) {
-                    try { await localforage.setItem(k, v); } catch(err) {}
+                for (const [k, v] of Object.entries(indexedDB)) {
+                    const ok = selectedCategories.some(c => matchAnyNeedles(k, c.indexedDBNeedles));
+                    if (!ok) continue;
+                    try { await localforage.setItem(k, v); } catch (err) {}
                 }
             }
+
             if (data.localStorage) {
-                for (const [k, v] of Object.entries(data.localStorage)) {
-                    try { localStorage.setItem(k, v); } catch(err) {}
+                for (const [k, v] of Object.entries(localStorageData)) {
+                    const ok = selectedCategories.some(c => matchAnyNeedles(k, c.localStorageNeedles));
+                    if (!ok) continue;
+                    try { localStorage.setItem(k, v); } catch (err) {}
                 }
             }
-            showNotification('恢复成功，即将刷新页面…', 'success', 2000);
+
+            showNotification('恢复完成，即将刷新页面…', 'success', 2000);
             setTimeout(() => location.reload(), 2200);
         } catch(e) {
             console.error('全量导入失败:', e);

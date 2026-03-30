@@ -160,6 +160,7 @@ function toggleBatchFavoriteMode() {
     if (annToggleBtn) annToggleBtn.classList.remove('active');
 
     showNotification('纪念日已添加', 'success');
+    if (typeof playSound === 'function') playSound('anniversary');
 }
 
         function showAnniversaryAnimation(anniversary) {
@@ -172,12 +173,12 @@ function toggleBatchFavoriteMode() {
 
                 diffDays = Math.ceil((startDate - now) / (1000 * 60 * 60 * 24));
                 title = "倒数日";
-                message = `距离 ${anniversary.name} 还有`;
+                message = `即将到来`;
             } else {
 
                 diffDays = Math.floor((now - startDate) / (1000 * 60 * 60 * 24));
                 title = "纪念日快乐！";
-                message = `我们已经相伴了`;
+                message = `相伴至今`;
             }
 
             DOMElements.anniversaryAnimation.title.textContent = title;
@@ -218,6 +219,7 @@ const MOOD_OPTIONS = [
 ];
 
 let moodData = {}; 
+let moodTrash = [];
 let currentCalendarDate = new Date();
 window.selectedDateStr = null;
 let selectedDateStr = null;
@@ -232,7 +234,10 @@ async function initMoodData() {
     if (savedMoods) { moodData = savedMoods; }
     const savedCustomMoods = await localforage.getItem(getStorageKey('customMoodOptions'));
     if (savedCustomMoods) { customMoodOptions = savedCustomMoods; }
+    const savedTrash = await localforage.getItem(getStorageKey('moodTrash'));
+    if (savedTrash && Array.isArray(savedTrash)) { moodTrash = savedTrash; }
     window.moodData = moodData;
+    window.moodTrash = moodTrash;
     checkPartnerDailyMood();
 }
 function checkPartnerDailyMood() {
@@ -249,7 +254,7 @@ function checkPartnerDailyMood() {
             saveMoodData();
             return;
         }
-        const randomMood = MOOD_OPTIONS[Math.floor(Math.random() * MOOD_OPTIONS.length)];
+        const randomMood = getAllMoodOptions()[Math.floor(Math.random() * getAllMoodOptions().length)];
         moodData[dateStr].partner = randomMood.key;
         try {
             const cReplies = (typeof customReplies !== 'undefined') ? customReplies : (window._customReplies || []);
@@ -277,6 +282,11 @@ function saveMoodData() {
 }
 function saveCustomMoodOptions() {
     localforage.setItem(getStorageKey('customMoodOptions'), customMoodOptions);
+}
+
+function saveMoodTrash() {
+    localforage.setItem(getStorageKey('moodTrash'), moodTrash).catch(() => {});
+    window.moodTrash = moodTrash;
 }
 function getAllMoodOptions() {
     return [...MOOD_OPTIONS, ...customMoodOptions];
@@ -544,14 +554,285 @@ window.editStatsWeather = function(el, who) {
 
 window.deleteDailyMood = function(dateStr, who) {
     if (!moodData[dateStr]) return;
-    if (who === 'me') { delete moodData[dateStr].user; delete moodData[dateStr].note; delete moodData[dateStr].myWeather; }
-    else { delete moodData[dateStr].partner; delete moodData[dateStr].partnerNote; delete moodData[dateStr].partnerWeather; }
+    const src = moodData[dateStr];
+    const trashItem = {
+        id: Date.now() + Math.random(),
+        dateStr,
+        who,
+        deletedAt: new Date().toISOString(),
+        payload: {}
+    };
+
+    if (who === 'me') {
+        trashItem.payload = {
+            user: src.user || null,
+            note: src.note || '',
+            myWeather: src.myWeather || ''
+        };
+        delete moodData[dateStr].user;
+        delete moodData[dateStr].note;
+        delete moodData[dateStr].myWeather;
+    } else {
+        trashItem.payload = {
+            partner: src.partner || null,
+            partnerNote: src.partnerNote || '',
+            partnerWeather: src.partnerWeather || ''
+        };
+        delete moodData[dateStr].partner;
+        delete moodData[dateStr].partnerNote;
+        delete moodData[dateStr].partnerWeather;
+    }
+
     if (!moodData[dateStr].user && !moodData[dateStr].partner) delete moodData[dateStr];
+
+    moodTrash.unshift(trashItem);
+    saveMoodTrash();
+
     saveMoodData();
     renderMoodCalendar();
-    showNotification('已删除心情记录', 'success');
+    showNotification('已移入回收站', 'success');
+    if (typeof playSound === 'function') playSound('mood');
+    renderMoodTrashList && renderMoodTrashList();
     closeMoodOverlay();
 };
+
+function _escapeHtml(s) {
+    return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function renderMoodTrashList() {
+    const list = document.getElementById('mood-trash-list');
+    if (!list) return;
+    if (!moodTrash || moodTrash.length === 0) {
+        list.innerHTML = `
+            <div style="padding:22px 0; text-align:center; color:var(--text-secondary);">
+                <div style="font-size:26px; opacity:0.35; margin-bottom:6px;">🗑</div>
+                <div style="font-weight:600; font-size:13px;">回收站空空如也</div>
+            </div>
+        `;
+        return;
+    }
+    const mName = (typeof settings !== 'undefined' && settings.myName) ? settings.myName : '我';
+    const pName = (typeof settings !== 'undefined' && settings.partnerName) ? settings.partnerName : '梦角';
+    const allMoods = getAllMoodOptions();
+
+    list.innerHTML = moodTrash.map(item => {
+        const whoLabel = item.who === 'me' ? mName : pName;
+        const moodKey = item.who === 'me' ? item.payload.user : item.payload.partner;
+        const moodObj = moodKey ? allMoods.find(o => o.key === moodKey) : null;
+        const moodText = moodObj ? `${moodObj.kaomoji} ${moodObj.label}` : '（无心情）';
+
+        return `
+            <div style="
+                display:flex; align-items:center; justify-content:space-between; gap:10px;
+                border:1.5px solid var(--border-color); background:var(--primary-bg);
+                border-radius:14px; padding:12px 12px; margin-bottom:10px;
+            ">
+                <div style="min-width:0;">
+                    <div style="font-size:13px; font-weight:700; color:var(--text-primary);">
+                        ${_escapeHtml(item.dateStr)} · ${_escapeHtml(whoLabel)}
+                    </div>
+                    <div style="font-size:12px; color:var(--text-secondary); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                        ${_escapeHtml(moodText)}
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px; flex-shrink:0;">
+                    <button class="modal-btn modal-btn-secondary" onclick="restoreMoodTrashItem('${item.id}')" style="padding:7px 10px; font-size:12px; flex-shrink:0;">
+                        恢复
+                    </button>
+                    <button class="modal-btn modal-btn-secondary" onclick="deleteMoodTrashItem('${item.id}')" style="padding:7px 10px; font-size:12px; color:#ff6b6b; border-color:rgba(255,107,107,0.4); flex-shrink:0;">
+                        彻底删除
+                    </button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+window.restoreMoodTrashItem = function(trashId) {
+    const idStr = String(trashId);
+    const item = (moodTrash || []).find(t => String(t.id) === idStr);
+    if (!item) return;
+
+    if (!moodData[item.dateStr]) moodData[item.dateStr] = {};
+    if (item.who === 'me') {
+        moodData[item.dateStr].user = item.payload.user;
+        moodData[item.dateStr].note = item.payload.note || '';
+        moodData[item.dateStr].myWeather = item.payload.myWeather || '';
+    } else {
+        moodData[item.dateStr].partner = item.payload.partner;
+        moodData[item.dateStr].partnerNote = item.payload.partnerNote || '';
+        moodData[item.dateStr].partnerWeather = item.payload.partnerWeather || '';
+    }
+
+    moodTrash = moodTrash.filter(t => String(t.id) !== idStr);
+    saveMoodTrash();
+    saveMoodData();
+    renderMoodCalendar();
+    renderMoodTrashList();
+    showNotification('已从回收站恢复', 'success');
+    if (typeof playSound === 'function') playSound('mood');
+};
+
+window.deleteMoodTrashItem = function(trashId) {
+    const idStr = String(trashId);
+    const item = (moodTrash || []).find(t => String(t.id) === idStr);
+    if (!item) return;
+    if (!confirm('确定要彻底删除这一条回收站记录吗？')) return;
+    moodTrash = moodTrash.filter(t => String(t.id) !== idStr);
+    saveMoodTrash();
+    renderMoodTrashList();
+    showNotification('已彻底删除', 'success');
+    if (typeof playSound === 'function') playSound('error');
+};
+
+function exportMoodBackup() {
+    try {
+        const payload = {
+            type: 'mood-backup',
+            exportDate: new Date().toISOString(),
+            moodCalendar: moodData,
+            customMoodOptions: customMoodOptions,
+            moodTrash: moodTrash
+        };
+        const fileName = `mood-backup-${new Date().toISOString().slice(0, 10)}.json`;
+        exportDataToMobileOrPC(JSON.stringify(payload, null, 2), fileName);
+        showNotification('✓ 心晴手账已导出', 'success');
+        if (typeof playSound === 'function') playSound('export');
+    } catch (e) {
+        console.error('心晴手账导出失败:', e);
+        showNotification('心晴手账导出失败', 'error');
+    }
+}
+
+async function importMoodBackupFile(file) {
+    if (!file) return;
+    const text = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsText(file);
+    });
+
+    let data = null;
+    try {
+        data = JSON.parse(text);
+    } catch (e) {
+        showNotification('导入文件格式不正确', 'error');
+        return;
+    }
+
+    if (!data || typeof data !== 'object') {
+        showNotification('导入文件无效', 'error');
+        return;
+    }
+
+    _showMoodImportPicker(data);
+}
+
+function _showMoodImportPicker(data) {
+    const hasCalendar = data.moodCalendar && typeof data.moodCalendar === 'object';
+    const hasCustom = Array.isArray(data.customMoodOptions);
+    const hasTrash = Array.isArray(data.moodTrash);
+
+    if (!hasCalendar && !hasCustom && !hasTrash) {
+        showNotification('文件不包含可导入的心晴手账数据', 'error');
+        return;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+        position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.6);
+        backdrop-filter:blur(10px);display:flex;align-items:flex-end;justify-content:center;
+    `;
+    overlay.innerHTML = `
+        <div style="
+            width:100%;max-width:520px;background:var(--secondary-bg);border-radius:24px 24px 0 0;
+            box-shadow:0 -10px 60px rgba(0,0,0,0.3);
+            padding:16px 18px env(safe-area-inset-bottom,0);
+        ">
+            <div style="width:36px;height:4px;border-radius:2px;background:var(--border-color);margin:0 auto 14px;"></div>
+            <div style="font-size:16px;font-weight:800;color:var(--text-primary);margin-bottom:10px;">选择导入内容</div>
+            <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 12px;border:1.5px solid var(--border-color);border-radius:16px;background:var(--primary-bg);margin-bottom:10px;opacity:${hasCalendar ? 1 : 0.45};">
+                <span style="font-size:13px;font-weight:700;color:var(--text-primary);">心情日历</span>
+                <input type="checkbox" id="mood-imp-cal" ${hasCalendar ? 'checked' : ''} ${hasCalendar ? '' : 'disabled'} style="transform:scale(1.1); accent-color:var(--accent-color);">
+            </label>
+            <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 12px;border:1.5px solid var(--border-color);border-radius:16px;background:var(--primary-bg);margin-bottom:10px;opacity:${hasCustom ? 1 : 0.45};">
+                <span style="font-size:13px;font-weight:700;color:var(--text-primary);">自定义心情</span>
+                <input type="checkbox" id="mood-imp-custom" ${hasCustom ? 'checked' : ''} ${hasCustom ? '' : 'disabled'} style="transform:scale(1.1); accent-color:var(--accent-color);">
+            </label>
+            <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 12px;border:1.5px solid var(--border-color);border-radius:16px;background:var(--primary-bg);margin-bottom:10px;opacity:${hasTrash ? 1 : 0.45};">
+                <span style="font-size:13px;font-weight:700;color:var(--text-primary);">回收站</span>
+                <input type="checkbox" id="mood-imp-trash" ${hasTrash ? 'checked' : ''} ${hasTrash ? '' : 'disabled'} style="transform:scale(1.1); accent-color:var(--accent-color);">
+            </label>
+            <div style="display:flex;gap:10px;margin-top:14px;">
+                <button id="mood-imp-cancel" class="modal-btn modal-btn-secondary" style="flex:1;padding:12px 0;">取消</button>
+                <button id="mood-imp-confirm" class="modal-btn modal-btn-primary" style="flex:1;padding:12px 0;">确认导入</button>
+            </div>
+        </div>
+    `;
+
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.getElementById('mood-imp-cancel').onclick = () => overlay.remove();
+    document.getElementById('mood-imp-confirm').onclick = () => {
+        const selCal = document.getElementById('mood-imp-cal').checked;
+        const selCustom = document.getElementById('mood-imp-custom').checked;
+        const selTrash = document.getElementById('mood-imp-trash').checked;
+
+        if (!selCal && !selCustom && !selTrash) {
+            showNotification('请至少选择一项', 'error');
+            return;
+        }
+
+        try {
+            if (selCal && hasCalendar) {
+                Object.keys(data.moodCalendar).forEach(dateStr => {
+                    if (!moodData[dateStr]) moodData[dateStr] = {};
+                    if (data.moodCalendar[dateStr] && typeof data.moodCalendar[dateStr] === 'object') {
+                        Object.assign(moodData[dateStr], data.moodCalendar[dateStr]);
+                    }
+                });
+            }
+
+            if (selCustom && hasCustom) {
+                const map = new Map();
+                (customMoodOptions || []).forEach(m => map.set(m.key, m));
+                data.customMoodOptions.forEach(m => map.set(m.key, m));
+                customMoodOptions = [...map.values()];
+            }
+
+            if (selTrash && hasTrash) {
+                const map = new Map();
+                (moodTrash || []).forEach(t => map.set(String(t.id), t));
+                data.moodTrash.forEach(t => map.set(String(t.id), t));
+                moodTrash = [...map.values()];
+            }
+
+            window.moodData = moodData;
+            window.moodTrash = moodTrash;
+
+            saveMoodData();
+            saveCustomMoodOptions();
+            saveMoodTrash();
+
+            renderMoodCalendar();
+            renderMoodTrashList();
+            showNotification('✓ 导入成功', 'success');
+            if (typeof playSound === 'function') playSound('import');
+            overlay.remove();
+        } catch (err) {
+            console.error('心晴手账导入失败:', err);
+            showNotification('导入失败', 'error');
+        }
+    };
+
+    document.body.appendChild(overlay);
+}
 
 function renderMoodOptionsGrid(targetKey) {
     const allMoods = getAllMoodOptions();
@@ -565,7 +846,7 @@ function renderMoodOptionsGrid(targetKey) {
              onclick="tempSelectMood('${mood.key}')">
             <div class="mood-kaomoji" style="${isSelected ? 'color:#fff' : `color:${mood.color}`}">${mood.kaomoji}</div>
             <div class="mood-label">${mood.label}</div>
-            ${isCustom ? `<div class="mood-custom-actions" onclick="event.stopPropagation()">
+            ${(isCustom && currentMoodEditTarget === 'me') ? `<div class="mood-custom-actions" onclick="event.stopPropagation()">
                 <button class="mood-custom-action-btn" onclick="editCustomMood('${mood.key}')" title="编辑">✏️</button>
                 <button class="mood-custom-action-btn" onclick="deleteCustomMood('${mood.key}')" title="删除">🗑</button>
             </div>` : ''}
@@ -708,6 +989,7 @@ document.getElementById('confirm-mood-save').addEventListener('click', () => {
     saveMoodData();
     closeMoodOverlay();
     showNotification('记录已保存 ✦', 'success');
+    if (typeof playSound === 'function') playSound('mood');
 });
 
 function showDayDetails(dateStr, data) {
@@ -833,6 +1115,7 @@ window.saveCustomMood = function() {
     closeCustomMoodDialog();
     renderMoodOptionsGrid(currentMoodSelection);
     showNotification('自定义心情已添加 ✦', 'success');
+    if (typeof playSound === 'function') playSound('mood');
 };
 
 window.deleteCustomMood = function(key) {
@@ -840,6 +1123,7 @@ window.deleteCustomMood = function(key) {
     saveCustomMoodOptions();
     renderMoodOptionsGrid(currentMoodSelection);
     showNotification('已删除自定义心情', 'success');
+    if (typeof playSound === 'function') playSound('mood');
 };
 
 window.editCustomMood = function(key) {
@@ -867,22 +1151,27 @@ window.editCustomMood = function(key) {
         saveBtn.onclick = null;
         renderMoodOptionsGrid(currentMoodSelection);
         showNotification('自定义心情已更新 ✦', 'success');
+        if (typeof playSound === 'function') playSound('mood');
     };
 };
 
 function initMoodListeners() {
     const btnCalendar = document.getElementById('btn-view-calendar');
     const btnStats = document.getElementById('btn-view-stats');
+    const btnTrash = document.getElementById('btn-view-trash');
     const viewCalendar = document.getElementById('mood-calendar-view');
     const viewStats = document.getElementById('mood-stats-view');
+    const viewTrash = document.getElementById('mood-trash-view');
 
     if (btnCalendar && !btnCalendar.dataset.initialized) {
         btnCalendar.dataset.initialized = 'true';
         btnCalendar.addEventListener('click', () => {
             btnCalendar.classList.add('active');
             btnStats.classList.remove('active');
+            btnTrash && btnTrash.classList.remove('active');
             viewCalendar.classList.remove('hidden-view');
             viewStats.classList.add('hidden-view');
+            viewTrash && viewTrash.classList.add('hidden-view');
         });
     }
 
@@ -893,7 +1182,22 @@ function initMoodListeners() {
             btnCalendar.classList.remove('active');
             viewStats.classList.remove('hidden-view');
             viewCalendar.classList.add('hidden-view');
+            btnTrash && btnTrash.classList.remove('active');
+            viewTrash && viewTrash.classList.add('hidden-view');
             renderMoodCalendar(); 
+        });
+    }
+
+    if (btnTrash && !btnTrash.dataset.initialized) {
+        btnTrash.dataset.initialized = 'true';
+        btnTrash.addEventListener('click', () => {
+            btnTrash.classList.add('active');
+            btnCalendar.classList.remove('active');
+            btnStats.classList.remove('active');
+            viewTrash && viewTrash.classList.remove('hidden-view');
+            viewCalendar && viewCalendar.classList.add('hidden-view');
+            viewStats && viewStats.classList.add('hidden-view');
+            renderMoodTrashList();
         });
     }
 
@@ -920,6 +1224,37 @@ function initMoodListeners() {
     if (closeMoodBtn && !closeMoodBtn.dataset.initialized) {
         closeMoodBtn.dataset.initialized = 'true';
         closeMoodBtn.addEventListener('click', () => hideModal(modal));
+    }
+
+    const exportMoodBtn = document.getElementById('mood-export-btn');
+    const importMoodBtn = document.getElementById('mood-import-btn');
+    const importFileInput = document.getElementById('mood-import-file-input');
+
+    if (exportMoodBtn && !exportMoodBtn.dataset.initialized) {
+        exportMoodBtn.dataset.initialized = 'true';
+        exportMoodBtn.addEventListener('click', () => {
+            if (typeof exportMoodBackup === 'function') exportMoodBackup();
+        });
+    }
+
+    if (importMoodBtn && !importMoodBtn.dataset.initialized) {
+        importMoodBtn.dataset.initialized = 'true';
+        importMoodBtn.addEventListener('click', () => {
+            importFileInput?.click();
+        });
+    }
+
+    if (importFileInput && !importFileInput.dataset.initialized) {
+        importFileInput.dataset.initialized = 'true';
+        importFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            try {
+                await importMoodBackupFile(file);
+            } finally {
+                importFileInput.value = '';
+            }
+        });
     }
     
     const cancelMoodBtn = document.getElementById('cancel-mood-edit');

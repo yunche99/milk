@@ -420,6 +420,7 @@ window.deleteAnniversaryItem = function(id) {
         throttledSaveData(); 
         renderAnniversariesList();
         showNotification('已删除', 'success');
+        if (typeof playSound === 'function') playSound('anniversary');
     }
 };
 
@@ -1238,13 +1239,36 @@ if (!isBatchMode && type === 'normal') {
     if (window._pendingReplyTimer) clearTimeout(window._pendingReplyTimer);
     window._pendingReplyTimer = null;
 
-    if (!shouldIgnore) {
+            if (!shouldIgnore) {
         if (settings.typingIndicatorEnabled) {
             const tiWrapper = document.getElementById('typing-indicator-wrapper');
             const tiLabel = document.getElementById('typing-indicator-label');
             const tiAvatar = document.getElementById('typing-indicator-avatar');
             if (tiLabel) tiLabel.textContent = (settings.partnerName || '对方') + ' 正在输入';
-            if (tiWrapper) { positionTypingIndicator(); tiWrapper.style.display = 'block'; }
+            if (tiWrapper) { 
+                positionTypingIndicator(); 
+                tiWrapper.style.display = 'block'; 
+                // 兜底：防止异常流程导致“正在输入中”卡住
+                try {
+                    if (window._typingIndicatorAutoHideTimer) clearTimeout(window._typingIndicatorAutoHideTimer);
+                    const maxMs = Number(settings.replyDelayMax) || 7000;
+                    const minMs = Number(settings.replyDelayMin) || 3000;
+                    const autoHideMs = Math.min(25000, maxMs * 3 + minMs + 1000);
+                    window._typingIndicatorAutoHideTimer = setTimeout(function() {
+                        try {
+                            var _tiW = document.getElementById('typing-indicator-wrapper');
+                            if (_tiW) {
+                                var _tiInner = _tiW.querySelector('.typing-indicator');
+                                if (_tiInner) _tiInner.classList.add('hiding');
+                                setTimeout(function() {
+                                    _tiW.style.display = 'none';
+                                    if (_tiInner) _tiInner.classList.remove('hiding');
+                                }, 240);
+                            }
+                        } catch (e) {}
+                    }, autoHideMs);
+                } catch (e) {}
+            }
             if (tiAvatar) {
                 const partnerImg = DOMElements.partner.avatar.querySelector('img');
                 tiAvatar.innerHTML = partnerImg ? `<img src="${partnerImg.src}">` : '<i class="fas fa-user"></i>';
@@ -1375,7 +1399,30 @@ if (!isBatchMode && type === 'normal') {
                 const tiLabel = document.getElementById('typing-indicator-label');
                 const tiAvatar = document.getElementById('typing-indicator-avatar');
                 if (tiLabel) tiLabel.textContent = (settings.partnerName || '对方') + ' 正在输入';
-                if (tiWrapper) { positionTypingIndicator(); tiWrapper.style.display = 'block'; }
+                if (tiWrapper) { 
+                    positionTypingIndicator(); 
+                    tiWrapper.style.display = 'block'; 
+                    // 兜底：防止“正在输入中”卡住（批量/异常流程也适用）
+                    try {
+                        if (window._typingIndicatorAutoHideTimer) clearTimeout(window._typingIndicatorAutoHideTimer);
+                        const maxMs = Number(settings.replyDelayMax) || 7000;
+                        const minMs = Number(settings.replyDelayMin) || 3000;
+                        const autoHideMs = Math.min(25000, maxMs * 3 + minMs + 1000);
+                        window._typingIndicatorAutoHideTimer = setTimeout(function() {
+                            try {
+                                var _tiW = document.getElementById('typing-indicator-wrapper');
+                                if (_tiW) {
+                                    var _tiInner = _tiW.querySelector('.typing-indicator');
+                                    if (_tiInner) _tiInner.classList.add('hiding');
+                                    setTimeout(function() {
+                                        _tiW.style.display = 'none';
+                                        if (_tiInner) _tiInner.classList.remove('hiding');
+                                    }, 240);
+                                }
+                            } catch (e) {}
+                        }, autoHideMs);
+                    } catch (e) {}
+                }
                 if (tiAvatar) {
                     const partnerImg = DOMElements.partner.avatar.querySelector('img');
                     tiAvatar.innerHTML = partnerImg ? `<img src="${partnerImg.src}">` : '<i class="fas fa-user"></i>';
@@ -1414,44 +1461,29 @@ if (partnerPersonas && partnerPersonas.length > 0 && Math.random() < 0.3) {
             }
             if (Math.random() < 0.03) {
                 if (customPokes && customPokes.length > 0) {
-        const randomAction = getRandomItem(customPokes);
-                const pokeTypes = [{
-                    prefix: "💫",
-                    text: `${settings.partnerName} ${randomAction}`
-                },
-                    {
-                        prefix: "✨",
-                        text: `${settings.partnerName} ${randomAction}`
-                    },
-                    {
-                        prefix: "🌟",
-                        text: `${settings.partnerName} ${randomAction}`
-                    },
-                    {
-                        prefix: "🥰",
-                        text: `${settings.partnerName} ${randomAction}`
-                    },
-                    {
-                        prefix: "💖",
-                        text: `${settings.partnerName} ${randomAction}`
-                    }];
+                    let randomAction = getRandomItem(customPokes);
+                    if (typeof window._sanitizePokeTextForDisplay === 'function') {
+                        randomAction = window._sanitizePokeTextForDisplay(randomAction);
+                    }
+                    const pokeText = (typeof window._formatPartnerPokeText === 'function')
+                        ? window._formatPartnerPokeText(`${settings.partnerName} ${randomAction}`)
+                        : `${settings.partnerName} ${randomAction}`;
 
-               const selectedPoke = getRandomItem(pokeTypes);
-        
-        addMessage({
-            id: Date.now(),
-            text: `${selectedPoke.prefix} ${settings.partnerName} ${randomAction} ${selectedPoke.prefix}`,
-            timestamp: new Date(),
-            type: 'system'
-        });
-        (function(){var _tiW=document.getElementById('typing-indicator-wrapper');if(_tiW){var _tiInner=_tiW.querySelector('.typing-indicator');if(_tiInner){_tiInner.classList.add('hiding');setTimeout(function(){_tiW.style.display='none';if(_tiInner)_tiInner.classList.remove('hiding');},240);}else{_tiW.style.display='none';}}})();
+                    addMessage({
+                        id: Date.now(),
+                        text: pokeText,
+                        timestamp: new Date(),
+                        type: 'system'
+                    });
+                    if (typeof playSound === 'function') playSound('poke');
+        (function(){try{if(window._typingIndicatorAutoHideTimer){clearTimeout(window._typingIndicatorAutoHideTimer);window._typingIndicatorAutoHideTimer=null;}}catch(e){}var _tiW=document.getElementById('typing-indicator-wrapper');if(_tiW){var _tiInner=_tiW.querySelector('.typing-indicator');if(_tiInner){_tiInner.classList.add('hiding');setTimeout(function(){_tiW.style.display='none';if(_tiInner)_tiInner.classList.remove('hiding');},240);}else{_tiW.style.display='none';}}})();
         return;
     }
 }
 
             const replyCount = Math.random() < 0.75 ? 1: (Math.random() < 0.95 ? 2: 3);
             if (!customReplies || customReplies.length === 0) {
-                (function(){var _tiW=document.getElementById('typing-indicator-wrapper');if(_tiW){var _tiInner=_tiW.querySelector('.typing-indicator');if(_tiInner){_tiInner.classList.add('hiding');setTimeout(function(){_tiW.style.display='none';if(_tiInner)_tiInner.classList.remove('hiding');},240);}else{_tiW.style.display='none';}}})();
+                (function(){try{if(window._typingIndicatorAutoHideTimer){clearTimeout(window._typingIndicatorAutoHideTimer);window._typingIndicatorAutoHideTimer=null;}}catch(e){}var _tiW=document.getElementById('typing-indicator-wrapper');if(_tiW){var _tiInner=_tiW.querySelector('.typing-indicator');if(_tiInner){_tiInner.classList.add('hiding');setTimeout(function(){_tiW.style.display='none';if(_tiInner)_tiInner.classList.remove('hiding');},240);}else{_tiW.style.display='none';}}})();
                 showNotification('还没有添加字卡，请先到"自定义回复"中添加字卡', 'info', 4000);
                 return;
             }
@@ -1480,7 +1512,13 @@ if (partnerPersonas && partnerPersonas.length > 0 && Math.random() < 0.3) {
                     const replyPool = customReplies.filter(r => !disabledItems.has(r) && !disabledGroupItems.has(r));
                     const replyText = replyPool[Math.floor(Math.random() * replyPool.length)];
 
-                    const shouldSendSticker = stickerLibrary && stickerLibrary.length > 0 && Math.random() < 0.2;
+                    let disabledStickerItems = new Set();
+                    try {
+                        const raw = localStorage.getItem('disabledStickerItems');
+                        if (raw) disabledStickerItems = new Set(JSON.parse(raw));
+                    } catch (e) {}
+                    const enabledStickerPool = (stickerLibrary || []).filter(s => !disabledStickerItems.has(s));
+                    const shouldSendSticker = enabledStickerPool.length > 0 && Math.random() < 0.2;
 
                     let finalText = replyText;
                     let separateEmoji = null;
@@ -1514,7 +1552,7 @@ if (partnerPersonas && partnerPersonas.length > 0 && Math.random() < 0.3) {
                     playSound('message');
 
                     if (shouldSendSticker) {
-                        const randomSticker = stickerLibrary[Math.floor(Math.random() * stickerLibrary.length)];
+                        const randomSticker = enabledStickerPool[Math.floor(Math.random() * enabledStickerPool.length)];
                         setTimeout(() => {
                             addMessage({
                                 id: Date.now() + i + 2000,
@@ -1546,11 +1584,18 @@ if (partnerPersonas && partnerPersonas.length > 0 && Math.random() < 0.3) {
                                 note: null,
                                 type: 'normal'
                             });
+                            playSound('message');
                         }, 300 + Math.random() * 400);
                     }
 
                     if (i === replyCount - 1) {
                         (function() {
+                            try {
+                                if (window._typingIndicatorAutoHideTimer) {
+                                    clearTimeout(window._typingIndicatorAutoHideTimer);
+                                    window._typingIndicatorAutoHideTimer = null;
+                                }
+                            } catch (e) {}
                             var _tiW = document.getElementById('typing-indicator-wrapper');
                             if (_tiW) {
                                 var _tiInner = _tiW.querySelector('.typing-indicator');

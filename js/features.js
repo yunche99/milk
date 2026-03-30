@@ -23,6 +23,16 @@
         return p ? p.sym : '✦';
     }
 
+    // 用于“戳一戳”文本的清理：移除大部分表情类字符，避免用户文本里夹带 emoji
+    // 装饰符号仍由 _formatPokeText() 根据用户配置自动包裹输出
+    function _stripEmojiForPoke(text) {
+        return String(text || '')
+            // 常见 Emoji / 符号区段（尽量保守）
+            .replace(/[\u2600-\u27BF\u{1F300}-\u{1FAFF}]/gu, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
     window._formatPokeText = function(text) {
         var sym = _getSym(MY_SYM_KEY, MY_CUST_KEY);
         return sym ? (sym + ' ' + text + ' ' + sym) : text;
@@ -31,6 +41,7 @@
         var sym = _getSym(PTR_SYM_KEY, PTR_CUST_KEY);
         return sym ? (sym + ' ' + text + ' ' + sym) : text;
     };
+    window._sanitizePokeTextForDisplay = _stripEmojiForPoke;
 
     function _esc(s) {
         return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -471,8 +482,11 @@ function showPokeTab() {
     const quickPokes = customPokes.slice(0, 6);
     
     quickPokes.forEach(pokeText => {
+        const cleanPokeText = (typeof window._sanitizePokeTextForDisplay === 'function')
+            ? window._sanitizePokeTextForDisplay(pokeText)
+            : pokeText;
         const btn = document.createElement('button');
-        btn.textContent = pokeText;
+        btn.textContent = cleanPokeText;
         btn.style.cssText = `
             padding: 10px 14px;
             background: linear-gradient(135deg, var(--secondary-bg), rgba(var(--accent-color-rgb),0.04));
@@ -499,7 +513,7 @@ function showPokeTab() {
         btn.onclick = () => {
             addMessage({
                 id: Date.now(), 
-                text: _formatPokeText(`${settings.myName} ${pokeText}`), 
+                text: _formatPokeText(`${settings.myName} ${cleanPokeText}`), 
                 timestamp: new Date(), 
                 type: 'system'
             });

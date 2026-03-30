@@ -169,9 +169,13 @@ if (target.classList.contains('delete-btn')) {
             });
             DOMElements.pokeModal.save.addEventListener('click', () => {
                 let pokeText = DOMElements.pokeModal.input.value.trim() || `${settings.myName} 拍了拍 ${settings.partnerName}`;
+                if (typeof window._sanitizePokeTextForDisplay === 'function') {
+                    pokeText = window._sanitizePokeTextForDisplay(pokeText);
+                }
                 addMessage({
                     id: Date.now(), text: _formatPokeText(pokeText), timestamp: new Date(), type: 'system'
                 });
+                if (typeof playSound === 'function') playSound('poke');
                 hideModal(DOMElements.pokeModal.modal);
                 DOMElements.pokeModal.input.value = '';
                 const delayRange = settings.replyDelayMax - settings.replyDelayMin;

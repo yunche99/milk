@@ -3,6 +3,7 @@ if (typeof replyGroupsEnabled === 'undefined') window.replyGroupsEnabled = false
 
 let _batchSelectedIndices = new Set();
 let _batchModeActive = false;
+let _batchModeTarget = 'custom'; // 'custom' or 'stickers' (depends on currentSubTab when batch mode enabled)
 let _searchVisible = false;
 let _searchQuery = '';
 let _searchDebounceTimer = null;
@@ -238,6 +239,8 @@ function renderReplyLibrary() {
 function _renderModernToolbar() {
     let toolbar = document.getElementById('batch-ops-toolbar');
     const isMainCustom = currentMajorTab === 'reply' && currentSubTab === 'custom';
+    const isStickersTab = currentMajorTab === 'reply' && currentSubTab === 'stickers';
+    const canBatch = isMainCustom || isStickersTab;
 
     if (!toolbar) {
         toolbar = document.createElement('div');
@@ -248,7 +251,7 @@ function _renderModernToolbar() {
     toolbar.style.display = '';
 
     const disabledSet = _getDisabledItemsSet();
-    const totalItems = currentMajorTab === 'reply' && currentSubTab === 'custom' ? customReplies.length : 0;
+    const totalItems = isMainCustom ? customReplies.length : (isStickersTab ? stickerLibrary.length : 0);
     const selectedCount = _batchSelectedIndices.size;
 
     const addBtnLabel = (() => {
@@ -289,6 +292,7 @@ function _renderModernToolbar() {
 
     let batchActionsHtml = '';
     if (_batchModeActive) {
+        const showGroupBtn = isMainCustom;
         batchActionsHtml = `
             <div id="batch-action-bar" style="
                 display:flex;align-items:center;gap:6px;padding:8px 15px;
@@ -308,9 +312,11 @@ function _renderModernToolbar() {
                 <span style="font-size:12px;color:var(--text-secondary);flex:1;min-width:60px;">
                     ${selectedCount > 0 ? `已选 <strong style="color:var(--text-primary);">${selectedCount}</strong> 条` : '点击字卡以选择'}
                 </span>
-                <button id="batch-group-btn" class="batch-act-pill ${selectedCount === 0 ? 'batch-act-disabled' : ''}" data-tip="分配分组">
-                    ${ICONS.tag} 分组
-                </button>
+                ${showGroupBtn ? `
+                    <button id="batch-group-btn" class="batch-act-pill ${selectedCount === 0 ? 'batch-act-disabled' : ''}" data-tip="分配分组">
+                        ${ICONS.tag} 分组
+                    </button>
+                ` : ''}
                 <button id="batch-disable-btn" class="batch-act-pill ${selectedCount === 0 ? 'batch-act-disabled' : ''}" data-tip="屏蔽/启用">
                     ${ICONS.eyeOff} 屏蔽
                 </button>
@@ -378,7 +384,7 @@ function _renderModernToolbar() {
                 ${ICONS.dedup}
             </button>
             <div style="flex:1;"></div>
-            ${isMainCustom ? `
+            ${canBatch ? `
             <button class="toolbar-icon-btn ${_batchModeActive ? 'active' : ''}" id="tb-batch-btn" title="${_batchModeActive ? '退出批量' : '批量管理'}">
                 ${ICONS.batch}
             </button>` : ''}
@@ -437,11 +443,13 @@ function _renderModernToolbar() {
         toolbar.querySelector('#tb-search-clear').onclick = () => { _searchVisible = false; _searchQuery = ''; renderReplyLibrary(); };
     }
 
-    if (isMainCustom) {
-        toolbar.querySelector('#tb-groups-btn')?.addEventListener('click', _showGroupManager);
-        const tbBatch = toolbar.querySelector('#tb-batch-btn');
-        if (tbBatch) tbBatch.onclick = () => {
+    if (isMainCustom) toolbar.querySelector('#tb-groups-btn')?.addEventListener('click', _showGroupManager);
+    const tbBatch = toolbar.querySelector('#tb-batch-btn');
+    if (tbBatch) {
+        tbBatch.onclick = () => {
+            if (!canBatch) return;
             _batchModeActive = !_batchModeActive;
+            _batchModeTarget = isStickersTab ? 'stickers' : 'custom';
             _batchSelectedIndices.clear();
             renderReplyLibrary();
         };
@@ -462,32 +470,50 @@ function _renderModernToolbar() {
     if (_batchModeActive) {
         toolbar.querySelector('#batch-select-all-btn')?.addEventListener('click', () => {
             if (_batchSelectedIndices.size === totalItems) _batchSelectedIndices.clear();
-            else customReplies.forEach((_, i) => _batchSelectedIndices.add(i));
+            else {
+                const pool = isMainCustom ? customReplies : stickerLibrary;
+                pool.forEach((_, i) => _batchSelectedIndices.add(i));
+            }
             renderReplyLibrary();
         });
         toolbar.querySelector('#batch-group-btn')?.addEventListener('click', () => {
+            if (!isMainCustom) return;
             if (_batchSelectedIndices.size === 0) return;
             _showBatchGroupPicker();
         });
         toolbar.querySelector('#batch-disable-btn')?.addEventListener('click', () => {
             if (_batchSelectedIndices.size === 0) return;
-            _batchToggleDisable();
+            if (isStickersTab) _batchToggleDisableStickers();
+            else _batchToggleDisable();
         });
         toolbar.querySelector('#batch-delete-btn')?.addEventListener('click', () => {
             if (_batchSelectedIndices.size === 0) return;
             if (!confirm(`确定删除选中的 ${_batchSelectedIndices.size} 条？`)) return;
             const indices = [..._batchSelectedIndices].sort((a, b) => b - a);
-            const deletedTexts = indices.map(i => customReplies[i]);
-            indices.forEach(i => customReplies.splice(i, 1));
-            if (customReplyGroups) {
-                customReplyGroups.forEach(g => {
-                    if (g.items) g.items = g.items.filter(t => !deletedTexts.includes(t));
-                });
+            if (isStickersTab) {
+                const deleted = indices.map(i => stickerLibrary[i]).filter(Boolean);
+                indices.forEach(i => stickerLibrary.splice(i, 1));
+                // 同步清理已删除条目的“屏蔽集合”
+                const dis = _getDisabledStickerItemsSet();
+                deleted.forEach(d => dis.delete(d));
+                _saveDisabledStickerItemsSet(dis);
+                _batchSelectedIndices.clear();
+                throttledSaveData();
+                renderReplyLibrary();
+                showNotification(`已删除 ${indices.length} 个贴纸`, 'success');
+            } else {
+                const deletedTexts = indices.map(i => customReplies[i]);
+                indices.forEach(i => customReplies.splice(i, 1));
+                if (customReplyGroups) {
+                    customReplyGroups.forEach(g => {
+                        if (g.items) g.items = g.items.filter(t => !deletedTexts.includes(t));
+                    });
+                }
+                _batchSelectedIndices.clear();
+                throttledSaveData();
+                renderReplyLibrary();
+                showNotification(`已删除 ${indices.length} 条`, 'success');
             }
-            _batchSelectedIndices.clear();
-            throttledSaveData();
-            renderReplyLibrary();
-            showNotification(`已删除 ${indices.length} 条`, 'success');
         });
     }
 }
@@ -800,14 +826,34 @@ function _renderEmojiTab(list, itemsToRender) {
 }
 
 function _renderStickerTab(list, itemsToRender) {
+    const disabledSet = _getDisabledStickerItemsSet();
     itemsToRender.forEach((item, index) => {
         const div = document.createElement('div');
-        div.className = 'sticker-item';
-        div.innerHTML = `<img src="${item}" loading="lazy"><div class="sticker-delete-btn"><i class="fas fa-times"></i></div>`;
+        const isDisabled = disabledSet.has(item);
+        const isSelected = _batchModeActive && _batchSelectedIndices.has(index);
+        div.className = `sticker-item${isDisabled ? ' sticker-disabled' : ''}${isSelected ? ' sticker-batch-selected' : ''}`;
+        div.innerHTML = `
+            <img src="${item}" loading="lazy">
+            <div class="sticker-batch-check">✓</div>
+            <div class="sticker-delete-btn"><i class="fas fa-times"></i></div>
+        `;
+        div.addEventListener('click', () => {
+            if (!_batchModeActive) return;
+            if (currentMajorTab !== 'reply' || currentSubTab !== 'stickers') return;
+            if (isSelected) _batchSelectedIndices.delete(index);
+            else _batchSelectedIndices.add(index);
+            renderReplyLibrary();
+        });
         div.querySelector('.sticker-delete-btn').addEventListener('click', e => {
             e.stopPropagation();
             if (confirm('删除此表情？')) {
+                // 如果该贴纸处于“已屏蔽”，删除后同步移出屏蔽集合
+                if (isDisabled) {
+                    disabledSet.delete(item);
+                    _saveDisabledStickerItemsSet(disabledSet);
+                }
                 stickerLibrary.splice(index, 1);
+                _batchSelectedIndices.clear();
                 throttledSaveData();
                 renderReplyLibrary();
             }
@@ -820,6 +866,17 @@ function _getDisabledItemsSet() {
         const raw = localStorage.getItem('disabledReplyItems');
         return raw ? new Set(JSON.parse(raw)) : new Set();
     } catch { return new Set(); }
+}
+
+function _getDisabledStickerItemsSet() {
+    try {
+        const raw = localStorage.getItem('disabledStickerItems');
+        return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch { return new Set(); }
+}
+
+function _saveDisabledStickerItemsSet(set) {
+    localStorage.setItem('disabledStickerItems', JSON.stringify([...set]));
 }
 
 function _saveDisabledItemsSet(set) {
@@ -846,6 +903,23 @@ function _batchToggleDisable() {
         showNotification(`已屏蔽 ${selectedItems.length} 条`, 'info');
     }
     _saveDisabledItemsSet(set);
+    _batchSelectedIndices.clear();
+    renderReplyLibrary();
+}
+
+function _batchToggleDisableStickers() {
+    const set = _getDisabledStickerItemsSet();
+    const selectedItems = [..._batchSelectedIndices].map(i => stickerLibrary[i]).filter(Boolean);
+    if (selectedItems.length === 0) return;
+    const allDisabled = selectedItems.every(item => set.has(item));
+    if (allDisabled) {
+        selectedItems.forEach(item => set.delete(item));
+        showNotification(`已启用 ${selectedItems.length} 个贴纸`, 'success');
+    } else {
+        selectedItems.forEach(item => set.add(item));
+        showNotification(`已屏蔽 ${selectedItems.length} 个贴纸`, 'info');
+    }
+    _saveDisabledStickerItemsSet(set);
     _batchSelectedIndices.clear();
     renderReplyLibrary();
 }
