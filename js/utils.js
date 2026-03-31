@@ -141,7 +141,7 @@ function deduplicateContentArray(arr, baseSystemArray = []) {
                     ? customUrlByCategory.trim()
                     : legacyCustomUrl;
 
-                const KAKAO_TALK_URL = 'https://s3plus.meituan.net/opapisdk/op_ticket_1_885190757_1767105913093_qdqqd_9nzazd.mp3';
+                const KAKAO_TALK_URL = 'https://image.uglycat.cc/jl5xf9.mp3';
 
                 // 预设音效（无音效 / kakaoTalk）需要优先级高于自定义 URL
                 const presetId = (() => {

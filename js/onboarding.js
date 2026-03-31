@@ -649,7 +649,6 @@ async function fillAnnHeaderCard(ann) {
         milestonesEl.style.display = 'none';
     }
 
-    // 卡片本体只保留“天数 + 装饰符号”，其他信息放到数据页
     const titleEl = document.getElementById('ann-header-title');
     if (titleEl) titleEl.style.display = 'none';
     const labelEl2 = document.getElementById('ann-header-label');
@@ -663,7 +662,6 @@ async function fillAnnHeaderCard(ann) {
         const pushChip = (t) => chips.push(`<span class="ann-milestone-chip">${t}</span>`);
 
         if (!isCountdown) {
-            // 过去：重点把“距100天”这类提示搬到数据页
             if (diffDays > 0 && diffDays < 100) {
                 pushChip(`💫 距 100 天还有 ${100 - diffDays} 天`);
             }
@@ -673,13 +671,11 @@ async function fillAnnHeaderCard(ann) {
             const yearsPassed = Math.floor(diffDays / 365);
             if (yearsPassed > 0) pushChip(`🎊 已过 ${yearsPassed} 周年`);
 
-            // 额外：如果刚好超过 100 天但仍未到 365，补一个下一里程碑提示
             if (diffDays >= 100 && diffDays < 365) {
                 const nextCent = 100 * (Math.floor(diffDays / 100) + 1);
                 pushChip(`⏳ 距下一段百天还有 ${nextCent - diffDays} 天`);
             }
         } else {
-            // 倒数：同样用“百天”相关信息填数据页（不影响卡片简洁展示）
             const daysLeft = diffDays;
             if (daysLeft > 0 && daysLeft < 100) {
                 pushChip(`⏳ 距 100 天还有 ${100 - daysLeft} 天`);

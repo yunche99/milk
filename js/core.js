@@ -1258,27 +1258,6 @@ if (!isBatchMode && type === 'normal') {
             if (tiWrapper) { 
                 positionTypingIndicator(); 
                 tiWrapper.style.display = 'block'; 
-                // 兜底：防止异常流程导致“正在输入中”卡住
-                try {
-                    if (window._typingIndicatorAutoHideTimer) clearTimeout(window._typingIndicatorAutoHideTimer);
-                    const maxMs = Number(settings.replyDelayMax) || 7000;
-                    const minMs = Number(settings.replyDelayMin) || 3000;
-                    const autoHideMs = Math.min(25000, maxMs * 3 + minMs + 1000);
-                    window._typingIndicatorAutoHideTimer = setTimeout(function() {
-                        try {
-                            var _tiW = document.getElementById('typing-indicator-wrapper');
-                            if (_tiW) {
-                                var _tiInner = _tiW.querySelector('.typing-indicator');
-                                if (_tiInner) _tiInner.classList.add('hiding');
-                                setTimeout(function() {
-                                    _tiW.style.display = 'none';
-                                    if (_tiInner) _tiInner.classList.remove('hiding');
-                                }, 240);
-                            }
-                        } catch (e) {}
-                    }, autoHideMs);
-
-                } catch (e) {}
             }
             if (tiAvatar) {
                 const partnerImg = DOMElements.partner.avatar.querySelector('img');
@@ -1413,27 +1392,6 @@ if (!isBatchMode && type === 'normal') {
                 if (tiWrapper) { 
                     positionTypingIndicator(); 
                     tiWrapper.style.display = 'block'; 
-                    // 兜底：防止“正在输入中”卡住（批量/异常流程也适用）
-                    try {
-                        if (window._typingIndicatorAutoHideTimer) clearTimeout(window._typingIndicatorAutoHideTimer);
-                        const maxMs = Number(settings.replyDelayMax) || 7000;
-                        const minMs = Number(settings.replyDelayMin) || 3000;
-                        const autoHideMs = Math.min(25000, maxMs * 3 + minMs + 1000);
-                        window._typingIndicatorAutoHideTimer = setTimeout(function() {
-                            try {
-                                var _tiW = document.getElementById('typing-indicator-wrapper');
-                                if (_tiW) {
-                                    var _tiInner = _tiW.querySelector('.typing-indicator');
-                                    if (_tiInner) _tiInner.classList.add('hiding');
-                                    setTimeout(function() {
-                                        _tiW.style.display = 'none';
-                                        if (_tiInner) _tiInner.classList.remove('hiding');
-                                    }, 240);
-                                }
-                            } catch (e) {}
-                        }, autoHideMs);
-
-                    } catch (e) {}
                 }
                 if (tiAvatar) {
                     const partnerImg = DOMElements.partner.avatar.querySelector('img');
@@ -1441,8 +1399,6 @@ if (!isBatchMode && type === 'normal') {
                 }
                 DOMElements.chatContainer.scrollTop = DOMElements.chatContainer.scrollHeight;
             }
-
-            showTypingIndicator();
 
             let changed = false;
             messages.forEach(msg => {
@@ -1496,8 +1452,7 @@ if (partnerPersonas && partnerPersonas.length > 0 && Math.random() < 0.3) {
 
             const replyCount = Math.random() < 0.75 ? 1: (Math.random() < 0.95 ? 2: 3);
             if (!customReplies || customReplies.length === 0) {
-                (function(){try{if(window._typingIndicatorAutoHideTimer){clearTimeout(window._typingIndicatorAutoHideTimer);window._typingIndicatorAutoHideTimer=null;}}catch(e){}var _tiW=document.getElementById('typing-indicator-wrapper');if(_tiW){var _tiInner=_tiW.querySelector('.typing-indicator');if(_tiInner){_tiInner.classList.add('hiding');setTimeout(function(){_tiW.style.display='none';if(_tiInner)_tiInner.classList.remove('hiding');},240);}else{_tiW.style.display='none';}}})();
-                showNotification('还没有添加字卡，请先到"自定义回复"中添加字卡', 'info', 4000);
+                showNotification('回复库为空，请先到「自定义回复」中添加内容', 'info', 3500);
                 return;
             }
             const disabledItemsOnce = (() => {
@@ -1515,10 +1470,12 @@ if (partnerPersonas && partnerPersonas.length > 0 && Math.random() < 0.3) {
                 .map(r => String(r || '').trim())
                 .filter(Boolean);
             if (!replyPoolOnce.length) {
-                (function(){try{if(window._typingIndicatorAutoHideTimer){clearTimeout(window._typingIndicatorAutoHideTimer);window._typingIndicatorAutoHideTimer=null;}}catch(e){}var _tiW=document.getElementById('typing-indicator-wrapper');if(_tiW){var _tiInner=_tiW.querySelector('.typing-indicator');if(_tiInner){_tiInner.classList.add('hiding');setTimeout(function(){_tiW.style.display='none';if(_tiInner)_tiInner.classList.remove('hiding');},240);}else{_tiW.style.display='none';}}})();
-                showNotification('回复库可用内容为空，请检查是否全部被屏蔽/分组禁用', 'warning', 3500);
+                showNotification('回复库可用内容为空（可能被分组禁用或屏蔽），请到「自定义回复」中调整', 'info', 4000);
                 return;
             }
+
+            // 确认有可用回复后再展示“正在输入中”，避免空转
+            showTypingIndicator();
             let delay = 0;
             const recentUserMsgs = settings.replyEnabled
                 ? messages.filter(m => m.sender === 'user' && m.text).slice(-10)
@@ -1784,7 +1741,14 @@ function showModal(modalElement, focusElement = null) {
                         exportDate: new Date().toISOString(),
                         exportModules: []
                     };
-                    if (inclMsgs)     { exportObj.messages = messages; exportObj.exportModules.push('messages'); }
+                    if (inclMsgs)     {
+                        // 永远省略图片字段，只导出文字等基础信息，减小体积
+                        exportObj.messages = messages.map(m => {
+                            const { image, ...rest } = m;
+                            return rest;
+                        });
+                        exportObj.exportModules.push('messages');
+                    }
                     if (inclSettings) {
                         exportObj.settings = settings;
                         exportObj.exportModules.push('settings');
@@ -1798,7 +1762,11 @@ function showModal(modalElement, focusElement = null) {
                         exportObj.exportModules.push('customReplies');
                     }
                     if (inclAnn)      { exportObj.anniversaries = anniversaries; exportObj.exportModules.push('anniversaries'); }
-                    if (inclThemes)   { exportObj.customThemes = customThemes; exportObj.stickerLibrary = stickerLibrary; exportObj.exportModules.push('themes'); }
+                    if (inclThemes)   {
+                        exportObj.customThemes = customThemes;
+                        // stickerLibrary 体积较大，这里不再随聊天备份导出
+                        exportObj.exportModules.push('themes');
+                    }
 
                     const dataStr = JSON.stringify(exportObj, null, 2);
                     const parts = exportObj.exportModules.join('+');
