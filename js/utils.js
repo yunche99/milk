@@ -1156,7 +1156,6 @@ window.markLocalBackupUpdated = async function(reason) {
     try {
         await buildLocalSnapshotMeta(reason || 'local-edit');
         cloudAutoSyncDirty = true;
-        manageCloudAutoSyncTimer();
         if (typeof window.syncCloudAutoSyncSettingsUI === 'function') {
             window.syncCloudAutoSyncSettingsUI();
         }
