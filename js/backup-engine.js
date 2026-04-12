@@ -182,7 +182,7 @@
         if (!flags.inclThemes) p.push('backgroundGallery', 'chatBackground', 'partnerAvatar', 'myAvatar', 'playerCover');
         if (!flags.inclMsgs) p.push('chatMessages');
         if (!flags.inclSet) p.push('chatSettings', 'partnerPersonas', 'showPartnerNameInChat');
-        if (!flags.inclCustom) p.push('customReplies', 'customPokes', 'customStatuses', 'customMottos', 'customIntros', 'customEmojis', 'customReplyGroups');
+        if (!flags.inclCustom) p.push('customReplies', 'customPokes', 'customStatuses', 'customMottos', 'customIntros', 'customEmojis', 'customReplyGroups', 'customPokeGroups', 'customStatusGroups');
         if (!flags.inclAnn) p.push('anniversaries');
         if (!flags.inclThemes) p.push('customThemes', 'themeSchemes');
         if (!flags.inclDg) p.push('dg_custom_data', 'dg_status_pool', 'weekly_fortune', 'daily_fortune', 'customWeather_');
@@ -516,6 +516,26 @@
             } catch (e2) {
                 console.warn('[backup] localStorage 恢复失败', targetLsKey, e2);
             }
+        }
+
+        // 修复 sessionList 中的会话 ID：键已被 remap，但值里的 id 字段还是旧 sessionId
+        if (needRemap) {
+            try {
+                var slKey = appPfx + 'sessionList';
+                var sl = await localforage.getItem(slKey);
+                if (Array.isArray(sl)) {
+                    var remappedSl = sl.map(function(s) {
+                        if (s && s.id === backupSid) {
+                            var copy = {};
+                            for (var p in s) { if (Object.prototype.hasOwnProperty.call(s, p)) copy[p] = s[p]; }
+                            copy.id = curSid;
+                            return copy;
+                        }
+                        return s;
+                    });
+                    await localforage.setItem(slKey, remappedSl);
+                }
+            } catch (e4) {}
         }
 
         if (typeof APP_PREFIX !== 'undefined' && typeof SESSION_ID !== 'undefined') {

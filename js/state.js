@@ -27,6 +27,8 @@
         let customReplies = [];
         let customPokes = [];
         let customStatuses = [];
+        let customPokeGroups = [];
+        let customStatusGroups = [];
         let customMottos = [];
         let customIntros = []; 
         let currentMajorTab = 'reply'; 

@@ -1,13 +1,33 @@
-/**
- * features/reply-library.js — 回复库 · 全新重构版
- * ✦ 移动优先 · 底部 Tab 导航 · 精美卡片 · 分组高度自定义 · 批量管理
- */
-
 if (typeof customReplyGroups === 'undefined') window.customReplyGroups = [];
 if (typeof replyGroupsEnabled === 'undefined') window.replyGroupsEnabled = false;
+if (typeof customPokeGroups === 'undefined') window.customPokeGroups = [];
+if (typeof customStatusGroups === 'undefined') window.customStatusGroups = [];
+
+// 根据当前 tab 返回对应的分组上下文 {groups, items, itemLabel}
+function _getGroupCtx(tab) {
+    tab = tab || currentSubTab;
+    if (tab === 'pokes') {
+        if (!window.customPokeGroups) window.customPokeGroups = [];
+        return { groups: window.customPokeGroups, items: customPokes, itemLabel: '拍一拍' };
+    }
+    if (tab === 'statuses') {
+        if (!window.customStatusGroups) window.customStatusGroups = [];
+        return { groups: window.customStatusGroups, items: customStatuses, itemLabel: '状态' };
+    }
+    // default: custom replies
+    if (!window.customReplyGroups) window.customReplyGroups = [];
+    return { groups: window.customReplyGroups, items: customReplies, itemLabel: '字卡' };
+}
+
+// 判断当前 tab 是否支持分组
+function _tabHasGroups(tab) {
+    tab = tab || currentSubTab;
+    return tab === 'custom' || tab === 'pokes' || tab === 'statuses';
+}
 
 let _batchSelectedIndices = new Set();
 let _batchModeActive = false;
+let _batchModeTarget = 'custom'; // 'custom' or 'stickers' (depends on currentSubTab when batch mode enabled)
 let _searchVisible = false;
 let _searchQuery = '';
 let _searchDebounceTimer = null;
@@ -54,14 +74,63 @@ const ICONS = {
 };
 
 
-// 仅重渲染列表内容区域，不重建工具栏（搜索时使用，避免 input 焦点丢失）
+// ─── 共享样式：只注入一次，避免每张卡片各塞一个 <style> ───────────────────
+(function _injectReplyLibStyles() {
+    if (document.getElementById('rl-shared-styles')) return;
+    const s = document.createElement('style');
+    s.id = 'rl-shared-styles';
+    s.textContent = `
+        .rl-card {
+            display:flex;align-items:flex-start;gap:0;padding:11px 13px;
+            border-radius:12px;border:1.5px solid var(--border-color);
+            background:var(--secondary-bg);margin-bottom:7px;
+            transition:all 0.18s;position:relative;overflow:hidden;
+        }
+        .rl-card:hover { border-color:var(--accent-color);transform:translateY(-1px);box-shadow:0 3px 12px rgba(0,0,0,0.08); }
+        .rl-card.rl-selected { border-color:var(--accent-color);background:rgba(var(--accent-color-rgb,180,140,100),0.08); }
+        .rl-card-actions {
+            display:flex;gap:3px;margin-left:auto;flex-shrink:0;padding-left:8px;
+            opacity:0;transition:opacity 0.18s;align-items:center;
+        }
+        .rl-card:hover .rl-card-actions { opacity:1; }
+        @media (hover:none) { .rl-card-actions { opacity:1; } }
+        .rl-act-btn {
+            width:28px;height:28px;border-radius:8px;border:none;
+            background:transparent;color:var(--text-secondary);cursor:pointer;
+            display:flex;align-items:center;justify-content:center;transition:all 0.15s;
+            flex-shrink:0;
+        }
+        .rl-act-btn:hover { border-color:var(--accent-color);color:var(--accent-color); }
+        .rl-act-btn.danger:hover { border-color:#ef4444;color:#ef4444; }
+        .rl-act-btn.active { background:var(--accent-color);border-color:var(--accent-color);color:#fff; }
+        .rl-group-block { margin-bottom:12px; }
+        .rl-group-header {
+            display:flex;align-items:center;gap:9px;padding:9px 14px;
+            border-radius:12px 12px 0 0;
+            background:var(--secondary-bg);cursor:pointer;user-select:none;
+            transition:background 0.2s;
+        }
+        .rl-group-header.collapsed { border-radius:12px; }
+        .rl-group-header:hover { background:rgba(var(--accent-color-rgb,180,140,100),0.06); }
+        .rl-group-body { border:1px solid var(--border-color);border-top:none;border-radius:0 0 12px 12px;padding:6px 8px 8px;background:var(--primary-bg); }
+        .rl-group-tag {
+            display:inline-flex;align-items:center;gap:5px;
+            padding:2px 9px 2px 6px;border-radius:20px;
+            cursor:pointer;transition:all 0.15s;
+        }
+        .rl-batch-check {
+            width:18px;height:18px;border-radius:5px;flex-shrink:0;margin-top:1px;
+            display:flex;align-items:center;justify-content:center;transition:all 0.15s;
+        }
+    `;
+    (document.head || document.documentElement).appendChild(s);
+})();
+
 function _renderListContentOnly() {
     const list = document.getElementById('custom-replies-list');
     if (!list) return;
 
-    // 移除上次渲染的列表内容（保留 toolbar 和其子元素）
     const toolbar = document.getElementById('batch-ops-toolbar');
-    // 清理 list 中非 toolbar 的节点
     Array.from(list.children).forEach(child => {
         if (child !== toolbar) child.remove();
     });
@@ -106,7 +175,18 @@ function _renderListContentOnly() {
     }
 }
 
+let _rlRafId = null;
+/** 防抖版 renderReplyLibrary：同一帧内多次调用只渲染一次 */
+function renderReplyLibraryRaf() {
+    if (_rlRafId) return;
+    _rlRafId = requestAnimationFrame(() => {
+        _rlRafId = null;
+        renderReplyLibrary();
+    });
+}
+
 function renderReplyLibrary() {
+    if (currentMajorTab === 'announcement') return;
     const list = document.getElementById('custom-replies-list');
     const titleEl = document.getElementById('cr-modal-title');
     if (!list) return;
@@ -174,7 +254,7 @@ function renderReplyLibrary() {
         return;
     }
 
-    if (currentMajorTab === 'reply' && currentSubTab === 'custom') {
+    if (_tabHasGroups()) {
         _renderCardViewWithGroups(list, filtered);
     } else {
         _renderAtmosphereList(list, filtered);
@@ -184,6 +264,9 @@ function renderReplyLibrary() {
 function _renderModernToolbar() {
     let toolbar = document.getElementById('batch-ops-toolbar');
     const isMainCustom = currentMajorTab === 'reply' && currentSubTab === 'custom';
+    const isStickersTab = currentMajorTab === 'reply' && currentSubTab === 'stickers';
+    const hasGroupSupport = _tabHasGroups();
+    const canBatch = isMainCustom || isStickersTab;
 
     if (!toolbar) {
         toolbar = document.createElement('div');
@@ -194,7 +277,8 @@ function _renderModernToolbar() {
     toolbar.style.display = '';
 
     const disabledSet = _getDisabledItemsSet();
-    const totalItems = currentMajorTab === 'reply' && currentSubTab === 'custom' ? customReplies.length : 0;
+    const ctx = _getGroupCtx();
+    const totalItems = isMainCustom ? customReplies.length : (isStickersTab ? stickerLibrary.length : 0);
     const selectedCount = _batchSelectedIndices.size;
 
     const addBtnLabel = (() => {
@@ -203,10 +287,10 @@ function _renderModernToolbar() {
     })();
 
     let groupFilterHtml = '';
-    if (isMainCustom && customReplyGroups && customReplyGroups.length > 0) {
-        const allCount = customReplies.length;
-        const ungroupedCount = customReplies.filter(item =>
-            !customReplyGroups.some(g => g.items && g.items.includes(item))
+    if (hasGroupSupport && ctx.groups && ctx.groups.length > 0) {
+        const allCount = ctx.items.length;
+        const ungroupedCount = ctx.items.filter(item =>
+            !ctx.groups.some(g => g.items && g.items.includes(item))
         ).length;
         groupFilterHtml = `
             <div id="group-filter-pills" style="
@@ -219,8 +303,8 @@ function _renderModernToolbar() {
                 <button class="gfp-btn ${_activeGroupFilter === 'ungrouped' ? 'gfp-active' : ''}" data-filter="ungrouped">
                     未分组 <span class="gfp-count">${ungroupedCount}</span>
                 </button>
-                ${customReplyGroups.map(g => {
-                    const cnt = (g.items || []).filter(item => customReplies.includes(item)).length;
+                ${ctx.groups.map(g => {
+                    const cnt = (g.items || []).filter(item => ctx.items.includes(item)).length;
                     return `<button class="gfp-btn ${_activeGroupFilter === g.id ? 'gfp-active' : ''} ${g.disabled ? 'gfp-disabled' : ''}"
                         data-filter="${g.id}"
                         style="${_activeGroupFilter === g.id ? `background:${g.color}22;border-color:${g.color};color:${g.color};` : ''}">
@@ -235,6 +319,7 @@ function _renderModernToolbar() {
 
     let batchActionsHtml = '';
     if (_batchModeActive) {
+        const showGroupBtn = hasGroupSupport;
         batchActionsHtml = `
             <div id="batch-action-bar" style="
                 display:flex;align-items:center;gap:6px;padding:8px 15px;
@@ -254,9 +339,11 @@ function _renderModernToolbar() {
                 <span style="font-size:12px;color:var(--text-secondary);flex:1;min-width:60px;">
                     ${selectedCount > 0 ? `已选 <strong style="color:var(--text-primary);">${selectedCount}</strong> 条` : '点击字卡以选择'}
                 </span>
-                <button id="batch-group-btn" class="batch-act-pill ${selectedCount === 0 ? 'batch-act-disabled' : ''}" data-tip="分配分组">
-                    ${ICONS.tag} 分组
-                </button>
+                ${showGroupBtn ? `
+                    <button id="batch-group-btn" class="batch-act-pill ${selectedCount === 0 ? 'batch-act-disabled' : ''}" data-tip="分配分组">
+                        ${ICONS.tag} 分组
+                    </button>
+                ` : ''}
                 <button id="batch-disable-btn" class="batch-act-pill ${selectedCount === 0 ? 'batch-act-disabled' : ''}" data-tip="屏蔽/启用">
                     ${ICONS.eyeOff} 屏蔽
                 </button>
@@ -316,7 +403,7 @@ function _renderModernToolbar() {
             <button class="toolbar-icon-btn ${_searchVisible ? 'active' : ''}" id="tb-search-btn" title="搜索">
                 ${ICONS.search}
             </button>
-            ${isMainCustom ? `
+            ${hasGroupSupport ? `
             <button class="toolbar-icon-btn" id="tb-groups-btn" title="分组管理">
                 ${ICONS.folder}
             </button>` : ''}
@@ -324,7 +411,7 @@ function _renderModernToolbar() {
                 ${ICONS.dedup}
             </button>
             <div style="flex:1;"></div>
-            ${isMainCustom ? `
+            ${canBatch ? `
             <button class="toolbar-icon-btn ${_batchModeActive ? 'active' : ''}" id="tb-batch-btn" title="${_batchModeActive ? '退出批量' : '批量管理'}">
                 ${ICONS.batch}
             </button>` : ''}
@@ -383,11 +470,13 @@ function _renderModernToolbar() {
         toolbar.querySelector('#tb-search-clear').onclick = () => { _searchVisible = false; _searchQuery = ''; renderReplyLibrary(); };
     }
 
-    if (isMainCustom) {
-        toolbar.querySelector('#tb-groups-btn')?.addEventListener('click', _showGroupManager);
-        const tbBatch = toolbar.querySelector('#tb-batch-btn');
-        if (tbBatch) tbBatch.onclick = () => {
+    if (hasGroupSupport) toolbar.querySelector('#tb-groups-btn')?.addEventListener('click', _showGroupManager);
+    const tbBatch = toolbar.querySelector('#tb-batch-btn');
+    if (tbBatch) {
+        tbBatch.onclick = () => {
+            if (!canBatch) return;
             _batchModeActive = !_batchModeActive;
+            _batchModeTarget = isStickersTab ? 'stickers' : 'custom';
             _batchSelectedIndices.clear();
             renderReplyLibrary();
         };
@@ -408,53 +497,77 @@ function _renderModernToolbar() {
     if (_batchModeActive) {
         toolbar.querySelector('#batch-select-all-btn')?.addEventListener('click', () => {
             if (_batchSelectedIndices.size === totalItems) _batchSelectedIndices.clear();
-            else customReplies.forEach((_, i) => _batchSelectedIndices.add(i));
+            else {
+                const pool = isMainCustom ? customReplies : stickerLibrary;
+                pool.forEach((_, i) => _batchSelectedIndices.add(i));
+            }
             renderReplyLibrary();
         });
         toolbar.querySelector('#batch-group-btn')?.addEventListener('click', () => {
+            if (!isMainCustom) return;
             if (_batchSelectedIndices.size === 0) return;
             _showBatchGroupPicker();
         });
         toolbar.querySelector('#batch-disable-btn')?.addEventListener('click', () => {
             if (_batchSelectedIndices.size === 0) return;
-            _batchToggleDisable();
+            if (isStickersTab) _batchToggleDisableStickers();
+            else _batchToggleDisable();
         });
         toolbar.querySelector('#batch-delete-btn')?.addEventListener('click', () => {
             if (_batchSelectedIndices.size === 0) return;
             if (!confirm(`确定删除选中的 ${_batchSelectedIndices.size} 条？`)) return;
             const indices = [..._batchSelectedIndices].sort((a, b) => b - a);
-            const deletedTexts = indices.map(i => customReplies[i]);
-            indices.forEach(i => customReplies.splice(i, 1));
-            if (customReplyGroups) {
-                customReplyGroups.forEach(g => {
-                    if (g.items) g.items = g.items.filter(t => !deletedTexts.includes(t));
-                });
+            if (isStickersTab) {
+                const deleted = indices.map(i => stickerLibrary[i]).filter(Boolean);
+                indices.forEach(i => stickerLibrary.splice(i, 1));
+                // 同步清理已删除条目的“屏蔽集合”
+                const dis = _getDisabledStickerItemsSet();
+                deleted.forEach(d => dis.delete(d));
+                _saveDisabledStickerItemsSet(dis);
+                _batchSelectedIndices.clear();
+                throttledSaveData();
+                renderReplyLibrary();
+                showNotification(`已删除 ${indices.length} 个贴纸`, 'success');
+            } else {
+                const deletedTexts = indices.map(i => customReplies[i]);
+                indices.forEach(i => customReplies.splice(i, 1));
+                if (customReplyGroups) {
+                    customReplyGroups.forEach(g => {
+                        if (g.items) g.items = g.items.filter(t => !deletedTexts.includes(t));
+                    });
+                }
+                _batchSelectedIndices.clear();
+                throttledSaveData();
+                renderReplyLibrary();
+                showNotification(`已删除 ${indices.length} 条`, 'success');
             }
-            _batchSelectedIndices.clear();
-            throttledSaveData();
-            renderReplyLibrary();
-            showNotification(`已删除 ${indices.length} 条`, 'success');
         });
     }
 }
 
 function _renderCardViewWithGroups(list, items) {
+    const ctx = _getGroupCtx();
+    const groups = ctx.groups;
+    const sourceItems = ctx.items;
     const disabledSet = _getDisabledItemsSet();
-    const itemsWithIdx = items.map((text, idx) => ({
+    // 预建索引 Map，避免 indexOf 的 O(n²) 查找
+    const replyIndexMap = new Map();
+    sourceItems.forEach((r, i) => { if (!replyIndexMap.has(r)) replyIndexMap.set(r, i); });
+    const itemsWithIdx = items.map(text => ({
         text,
-        idx: customReplies.indexOf(text)
+        idx: replyIndexMap.has(text) ? replyIndexMap.get(text) : -1
     }));
 
     if (_activeGroupFilter === null) {
-        if (!customReplyGroups || customReplyGroups.length === 0) {
+        if (!groups || groups.length === 0) {
             _renderCardList(list, itemsWithIdx, disabledSet);
             return;
         }
 
         const inGroup = new Set();
-        customReplyGroups.forEach(g => {
+        groups.forEach(g => {
             const groupItems = (g.items || [])
-                .map(t => ({ text: t, idx: customReplies.indexOf(t) }))
+                .map(t => ({ text: t, idx: sourceItems.indexOf(t) }))
                 .filter(x => x.idx >= 0 && items.includes(x.text));
             groupItems.forEach(x => inGroup.add(x.idx));
             _renderGroupBlock(list, g, groupItems, disabledSet);
@@ -466,18 +579,18 @@ function _renderCardViewWithGroups(list, items) {
         }
     } else if (_activeGroupFilter === 'ungrouped') {
         const inGroup = new Set();
-        if (customReplyGroups) customReplyGroups.forEach(g => (g.items || []).forEach(t => {
-            const i = customReplies.indexOf(t);
+        if (groups) groups.forEach(g => (g.items || []).forEach(t => {
+            const i = sourceItems.indexOf(t);
             if (i >= 0) inGroup.add(i);
         }));
         const ungrouped = itemsWithIdx.filter(x => !inGroup.has(x.idx));
         if (ungrouped.length === 0) {
-            list.innerHTML = renderEmptyState('所有字卡均已分组');
+            list.innerHTML = renderEmptyState('所有内容均已分组');
         } else {
             _renderCardList(list, ungrouped, disabledSet);
         }
     } else {
-        const g = customReplyGroups.find(g => g.id === _activeGroupFilter);
+        const g = groups.find(g => g.id === _activeGroupFilter);
         if (!g) { list.innerHTML = renderEmptyState('分组不存在'); return; }
         const filtered = itemsWithIdx.filter(x => (g.items || []).includes(x.text));
         if (filtered.length === 0) {
@@ -496,26 +609,7 @@ function _renderGroupBlock(list, group, groupItems, disabledSet, isUngrouped = f
     const colorDot = group.color || '#868E96';
 
     section.innerHTML = `
-        <style>
-            .rl-group-block { margin-bottom:12px; }
-            .rl-group-header {
-                display:flex;align-items:center;gap:9px;padding:9px 14px;
-                border-radius:12px 12px ${isCollapsed ? '12px 12px' : '0 0'};
-                background:var(--secondary-bg);cursor:pointer;user-select:none;
-                transition:background 0.2s;
-                ${isDisabled ? 'opacity:0.5;' : ''}
-            }
-            .rl-group-header:hover { background:rgba(var(--accent-color-rgb,180,140,100),0.06); }
-            .rl-group-body { border:1px solid var(--border-color);border-top:none;border-radius:0 0 12px 12px;padding:6px 8px 8px;background:var(--primary-bg); }
-            .rl-group-tag {
-                display:inline-flex;align-items:center;gap:5px;
-                padding:2px 9px 2px 6px;border-radius:20px;
-                border:1.5px solid ${colorDot}30;background:${colorDot}15;
-                cursor:pointer;transition:all 0.15s;
-            }
-            .rl-group-tag:hover { background:${colorDot}30; }
-        </style>
-        <div class="rl-group-header" id="grp-hdr-${group.id}">
+        <div class="rl-group-header${isCollapsed ? ' collapsed' : ''}" id="grp-hdr-${group.id}" style="${isDisabled ? 'opacity:0.5;' : ''}">
             <div class="rl-group-tag" id="grp-tag-${group.id}" title="${isDisabled ? '点击启用此分组' : '点击屏蔽此分组'}">
                 <span style="width:8px;height:8px;border-radius:50%;background:${colorDot};flex-shrink:0;"></span>
                 <span style="font-size:12px;font-weight:700;color:${colorDot};">${group.name}</span>
@@ -572,7 +666,7 @@ function _renderGroupBlock(list, group, groupItems, disabledSet, isUngrouped = f
         group._collapsed = !group._collapsed;
         body.style.display = group._collapsed ? 'none' : 'block';
         section.querySelector('.grp-chevron').style.transform = group._collapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
-        section.querySelector('.rl-group-header').style.borderRadius = group._collapsed ? '12px' : '12px 12px 0 0';
+        section.querySelector('.rl-group-header').classList.toggle('collapsed', !!group._collapsed);
     });
 
     const tag = section.querySelector(`#grp-tag-${group.id}`);
@@ -588,14 +682,38 @@ function _renderGroupBlock(list, group, groupItems, disabledSet, isUngrouped = f
 
     section.querySelector('.grp-edit-btn')?.addEventListener('click', e => {
         e.stopPropagation();
-        _showGroupEditor(group);
+        _showGroupEditor(group, _getGroupCtx());
     });
 }
 
+const _CARD_PAGE_SIZE = 80; // 每次最多渲染 80 张，超过时追加"显示更多"
+
 function _renderCardList(container, itemsWithIdx, disabledSet) {
-    itemsWithIdx.forEach(({ text, idx }) => {
-        container.appendChild(_createCard(text, idx, disabledSet));
+    const total = itemsWithIdx.length;
+    const toRender = itemsWithIdx.slice(0, _CARD_PAGE_SIZE);
+    const remaining = total - toRender.length;
+
+    const frag = document.createDocumentFragment();
+    toRender.forEach(({ text, idx }) => {
+        frag.appendChild(_createCard(text, idx, disabledSet));
     });
+
+    if (remaining > 0) {
+        const btn = document.createElement('button');
+        btn.style.cssText = 'width:100%;padding:10px;margin-top:4px;border:1.5px dashed var(--border-color);border-radius:12px;background:transparent;color:var(--text-secondary);font-size:12px;cursor:pointer;font-family:var(--font-family);';
+        btn.textContent = `显示剩余 ${remaining} 条`;
+        btn.onclick = () => {
+            btn.remove();
+            const moreFrag = document.createDocumentFragment();
+            itemsWithIdx.slice(_CARD_PAGE_SIZE).forEach(({ text, idx }) => {
+                moreFrag.appendChild(_createCard(text, idx, disabledSet));
+            });
+            container.appendChild(moreFrag);
+        };
+        frag.appendChild(btn);
+    }
+
+    container.appendChild(frag);
 }
 
 function _createCard(item, index, disabledSet) {
@@ -605,8 +723,9 @@ function _createCard(item, index, disabledSet) {
     const isSelected = _batchSelectedIndices.has(index);
 
     const groupBadge = (() => {
-        if (!customReplyGroups) return '';
-        const g = customReplyGroups.find(grp => grp.items && grp.items.includes(item));
+        const groups = _getGroupCtx().groups;
+        if (!groups) return '';
+        const g = groups.find(grp => grp.items && grp.items.includes(item));
         if (!g) return '';
         return `<span style="
             display:inline-flex;align-items:center;gap:3px;
@@ -625,21 +744,12 @@ function _createCard(item, index, disabledSet) {
         : `<span style="font-size:13px;">${item}</span>`;
 
     if (_batchModeActive) {
-        div.style.cssText = `cursor:pointer;`;
+        div.style.cssText = 'cursor:pointer;';
+        div.className = 'rl-card' + (isSelected ? ' rl-selected' : '');
         div.innerHTML = `
-            <style>
-                .rl-card {
-                    display:flex;align-items:flex-start;gap:10px;padding:11px 13px;
-                    border-radius:12px;border:1.5px solid ${isSelected ? 'var(--accent-color)' : 'var(--border-color)'};
-                    background:${isSelected ? 'rgba(var(--accent-color-rgb,180,140,100),0.08)' : 'var(--secondary-bg)'};
-                    margin-bottom:7px;transition:all 0.15s;
-                }
-            </style>
-            <div style="
-                width:18px;height:18px;border-radius:5px;flex-shrink:0;margin-top:1px;
+            <div class="rl-batch-check" style="
                 border:1.5px solid ${isSelected ? 'var(--accent-color)' : 'var(--border-color)'};
                 background:${isSelected ? 'var(--accent-color)' : 'transparent'};
-                display:flex;align-items:center;justify-content:center;transition:all 0.15s;
             ">
                 ${isSelected ? `<svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 5l2.5 2.5L8 3" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>` : ''}
             </div>
@@ -657,30 +767,6 @@ function _createCard(item, index, disabledSet) {
     }
 
     div.innerHTML = `
-        <style>
-            .rl-card {
-                display:flex;align-items:flex-start;gap:0;padding:11px 13px;
-                border-radius:12px;border:1.5px solid var(--border-color);
-                background:var(--secondary-bg);margin-bottom:7px;
-                transition:all 0.18s;position:relative;overflow:hidden;
-            }
-            .rl-card:hover { border-color:var(--accent-color);transform:translateY(-1px);box-shadow:0 3px 12px rgba(0,0,0,0.08); }
-            .rl-card-actions {
-                display:flex;gap:3px;margin-left:auto;flex-shrink:0;padding-left:8px;
-                opacity:0;transition:opacity 0.18s;align-items:center;
-            }
-            .rl-card:hover .rl-card-actions { opacity:1; }
-            @media (hover:none) { .rl-card-actions { opacity:1; } }
-            .rl-act-btn {
-                width:28px;height:28px;border-radius:8px;border:none;
-                background:transparent;color:var(--text-secondary);cursor:pointer;
-                display:flex;align-items:center;justify-content:center;transition:all 0.15s;
-                flex-shrink:0;
-            }
-            .rl-act-btn:hover { border-color:var(--accent-color);color:var(--accent-color); }
-            .rl-act-btn.danger:hover { border-color:#ef4444;color:#ef4444; }
-            .rl-act-btn.active { background:var(--accent-color);border-color:var(--accent-color);color:#fff; }
-        </style>
         <div style="flex:1;min-width:0;${isDisabled ? 'opacity:0.4;text-decoration:line-through;' : ''}">
             ${displayText}
             ${groupBadge}
@@ -704,21 +790,23 @@ function _createCard(item, index, disabledSet) {
     div.querySelector('[data-action="delete"]').onclick = (e) => { e.stopPropagation(); deleteItem(index); };
     div.querySelector('[data-action="edit"]').onclick = (e) => { e.stopPropagation(); editItem(index, item); };
     div.querySelector('[data-action="disable"]').onclick = (e) => { e.stopPropagation(); _toggleItemDisable(item); };
-    div.querySelector('[data-action="tag"]').onclick = (e) => { e.stopPropagation(); _showSingleItemGroupPicker(item); };
+    div.querySelector('[data-action="tag"]').onclick = (e) => { e.stopPropagation(); _showSingleItemGroupPicker(item, _getGroupCtx()); };
 
     return div;
 }
 
 function _renderAtmosphereList(list, items) {
     const disabledSet = _getDisabledItemsSet();
+    // 预建各数组的索引 Map，避免 O(n²)
+    const indexMaps = {
+        pokes:    new Map(customPokes.map((r,i)   => [r, i])),
+        statuses: new Map(customStatuses.map((r,i) => [r, i])),
+        mottos:   new Map(customMottos.map((r,i)   => [r, i])),
+        intros:   new Map(customIntros.map((r,i)   => [r, i])),
+    };
+    const frag = document.createDocumentFragment();
     items.forEach((item, idx) => {
-        const realIdx = (() => {
-            if (currentSubTab === 'pokes') return customPokes.indexOf(item);
-            if (currentSubTab === 'statuses') return customStatuses.indexOf(item);
-            if (currentSubTab === 'mottos') return customMottos.indexOf(item);
-            if (currentSubTab === 'intros') return customIntros.indexOf(item);
-            return idx;
-        })();
+        const realIdx = (indexMaps[currentSubTab] || { get: () => idx }).get(item) ?? idx;
         const div = document.createElement('div');
         div.className = 'custom-reply-item';
         div.innerHTML = `
@@ -730,8 +818,9 @@ function _renderAtmosphereList(list, items) {
         `;
         div.querySelector('.delete-btn').onclick = () => deleteItem(realIdx);
         div.querySelector('.edit-btn').onclick = () => editItem(realIdx, item);
-        list.appendChild(div);
+        frag.appendChild(div);
     });
+    list.appendChild(frag);
 }
 
 function _renderEmojiTab(list, itemsToRender) {
@@ -768,14 +857,34 @@ function _renderEmojiTab(list, itemsToRender) {
 }
 
 function _renderStickerTab(list, itemsToRender) {
+    const disabledSet = _getDisabledStickerItemsSet();
     itemsToRender.forEach((item, index) => {
         const div = document.createElement('div');
-        div.className = 'sticker-item';
-        div.innerHTML = `<img src="${item}" loading="lazy"><div class="sticker-delete-btn"><i class="fas fa-times"></i></div>`;
+        const isDisabled = disabledSet.has(item);
+        const isSelected = _batchModeActive && _batchSelectedIndices.has(index);
+        div.className = `sticker-item${isDisabled ? ' sticker-disabled' : ''}${isSelected ? ' sticker-batch-selected' : ''}`;
+        div.innerHTML = `
+            <img src="${item}" loading="lazy">
+            <div class="sticker-batch-check">✓</div>
+            <div class="sticker-delete-btn"><i class="fas fa-times"></i></div>
+        `;
+        div.addEventListener('click', () => {
+            if (!_batchModeActive) return;
+            if (currentMajorTab !== 'reply' || currentSubTab !== 'stickers') return;
+            if (isSelected) _batchSelectedIndices.delete(index);
+            else _batchSelectedIndices.add(index);
+            renderReplyLibrary();
+        });
         div.querySelector('.sticker-delete-btn').addEventListener('click', e => {
             e.stopPropagation();
             if (confirm('删除此表情？')) {
+                // 如果该贴纸处于“已屏蔽”，删除后同步移出屏蔽集合
+                if (isDisabled) {
+                    disabledSet.delete(item);
+                    _saveDisabledStickerItemsSet(disabledSet);
+                }
                 stickerLibrary.splice(index, 1);
+                _batchSelectedIndices.clear();
                 throttledSaveData();
                 renderReplyLibrary();
             }
@@ -788,6 +897,17 @@ function _getDisabledItemsSet() {
         const raw = localStorage.getItem('disabledReplyItems');
         return raw ? new Set(JSON.parse(raw)) : new Set();
     } catch { return new Set(); }
+}
+
+function _getDisabledStickerItemsSet() {
+    try {
+        const raw = localStorage.getItem('disabledStickerItems');
+        return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch { return new Set(); }
+}
+
+function _saveDisabledStickerItemsSet(set) {
+    localStorage.setItem('disabledStickerItems', JSON.stringify([...set]));
 }
 
 function _saveDisabledItemsSet(set) {
@@ -818,6 +938,23 @@ function _batchToggleDisable() {
     renderReplyLibrary();
 }
 
+function _batchToggleDisableStickers() {
+    const set = _getDisabledStickerItemsSet();
+    const selectedItems = [..._batchSelectedIndices].map(i => stickerLibrary[i]).filter(Boolean);
+    if (selectedItems.length === 0) return;
+    const allDisabled = selectedItems.every(item => set.has(item));
+    if (allDisabled) {
+        selectedItems.forEach(item => set.delete(item));
+        showNotification(`已启用 ${selectedItems.length} 个贴纸`, 'success');
+    } else {
+        selectedItems.forEach(item => set.add(item));
+        showNotification(`已屏蔽 ${selectedItems.length} 个贴纸`, 'info');
+    }
+    _saveDisabledStickerItemsSet(set);
+    _batchSelectedIndices.clear();
+    renderReplyLibrary();
+}
+
 function _runDedup() {
     let totalRemoved = 0;
     const crDedup = deduplicateContentArray(customReplies, CONSTANTS.REPLY_MESSAGES);
@@ -842,15 +979,18 @@ function _runDedup() {
 }
 
 function _showGroupManager() {
+    const ctx = _getGroupCtx();
+    const groups = ctx.groups;
+    const sourceItems = ctx.items;
     const overlay = _makeOverlay();
 
     const render = () => {
-        const noGroups = !customReplyGroups || customReplyGroups.length === 0;
+        const noGroups = !groups || groups.length === 0;
         panel.querySelector('#gm-list').innerHTML = noGroups
             ? `<div style="text-align:center;padding:32px 0;color:var(--text-secondary);font-size:13px;opacity:0.7;">
                     还没有分组<br><span style="font-size:11px;">点击下方按钮创建第一个分组</span>
                </div>`
-            : customReplyGroups.map((g, i) => `
+            : groups.map((g, i) => `
                 <div style="
                     display:flex;align-items:center;gap:10px;padding:12px 14px;
                     border-radius:13px;border:1.5px solid var(--border-color);
@@ -859,7 +999,7 @@ function _showGroupManager() {
                 ">
                     <span style="width:12px;height:12px;border-radius:50%;background:${g.color||'#868E96'};flex-shrink:0;box-shadow:0 0 0 2px ${g.color||'#868E96'}30;"></span>
                     <span style="flex:1;font-size:13px;color:var(--text-primary);font-weight:600;">${g.name}</span>
-                    <span style="font-size:11px;color:var(--text-secondary);">${(g.items||[]).filter(t=>customReplies.includes(t)).length} 条</span>
+                    <span style="font-size:11px;color:var(--text-secondary);">${(g.items||[]).filter(t=>sourceItems.includes(t)).length} 条</span>
                     <button data-action="toggle" data-i="${i}" style="
                         width:28px;height:28px;border-radius:8px;border:1px solid var(--border-color);
                         background:${g.disabled ? 'var(--accent-color)' : 'transparent'};
@@ -884,14 +1024,14 @@ function _showGroupManager() {
                 const i = parseInt(btn.dataset.i);
                 const action = btn.dataset.action;
                 if (action === 'toggle') {
-                    customReplyGroups[i].disabled = !customReplyGroups[i].disabled;
+                    groups[i].disabled = !groups[i].disabled;
                     throttledSaveData(); render(); renderReplyLibrary();
                 } else if (action === 'edit') {
                     overlay.remove();
-                    _showGroupEditor(customReplyGroups[i]);
+                    _showGroupEditor(groups[i], ctx);
                 } else if (action === 'del') {
-                    if (confirm(`删除分组「${customReplyGroups[i].name}」？（字卡不会被删除）`)) {
-                        customReplyGroups.splice(i, 1);
+                    if (confirm(`删除分组「${groups[i].name}」？（内容不会被删除）`)) {
+                        groups.splice(i, 1);
                         throttledSaveData(); render(); renderReplyLibrary();
                     }
                 }
@@ -933,10 +1073,12 @@ function _showGroupManager() {
 
     panel.querySelector('#gm-close').onclick = () => overlay.remove();
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-    panel.querySelector('#gm-add').onclick = () => { overlay.remove(); _showGroupEditor(null); };
+    panel.querySelector('#gm-add').onclick = () => { overlay.remove(); _showGroupEditor(null, ctx); };
 }
 
-function _showGroupEditor(group) {
+function _showGroupEditor(group, ctx) {
+    ctx = ctx || _getGroupCtx();
+    const groups = ctx.groups;
     const isNew = !group;
     const overlay = _makeOverlay();
     const initColor = group?.color || GROUP_COLORS[Math.floor(Math.random() * GROUP_COLORS.length)];
@@ -1060,8 +1202,7 @@ function _showGroupEditor(group) {
         const name = panel.querySelector('#ge-name').value.trim();
         if (!name) { showNotification('请输入分组名称', 'warning'); return; }
         if (isNew) {
-            if (!window.customReplyGroups) window.customReplyGroups = [];
-            customReplyGroups.push({ id: Date.now(), name, color: selectedColor, disabled: false, items: [] });
+            groups.push({ id: Date.now(), name, color: selectedColor, disabled: false, items: [] });
         } else {
             group.name = name;
             group.color = selectedColor;
@@ -1073,13 +1214,15 @@ function _showGroupEditor(group) {
     };
 }
 
-function _showSingleItemGroupPicker(itemText) {
-    if (!customReplyGroups || customReplyGroups.length === 0) {
-        if (confirm('还没有分组，是否立即创建？')) _showGroupEditor(null);
+function _showSingleItemGroupPicker(itemText, ctx) {
+    ctx = ctx || _getGroupCtx();
+    const groups = ctx.groups;
+    if (!groups || groups.length === 0) {
+        if (confirm('还没有分组，是否立即创建？')) _showGroupEditor(null, ctx);
         return;
     }
     const overlay = _makeOverlay();
-    const currentGroup = customReplyGroups.find(g => g.items && g.items.includes(itemText));
+    const currentGroup = groups.find(g => g.items && g.items.includes(itemText));
 
     const panel = document.createElement('div');
     panel.style.cssText = `
@@ -1096,7 +1239,7 @@ function _showSingleItemGroupPicker(itemText) {
                 <input type="radio" name="sgp" value="" ${!currentGroup ? 'checked' : ''} style="accent-color:var(--accent-color);">
                 <span style="font-size:13px;color:var(--text-secondary);">不分组</span>
             </label>
-            ${customReplyGroups.map((g, i) => `
+            ${groups.map((g, i) => `
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;border-radius:11px;border:1.5px solid ${currentGroup?.id === g.id ? g.color : 'var(--border-color)'};background:${currentGroup?.id === g.id ? g.color + '10' : 'var(--primary-bg)'};">
                     <input type="radio" name="sgp" value="${i}" ${currentGroup?.id === g.id ? 'checked' : ''} style="accent-color:${g.color};">
                     <span style="width:9px;height:9px;border-radius:50%;background:${g.color||'#aaa'};flex-shrink:0;"></span>
@@ -1118,11 +1261,11 @@ function _showSingleItemGroupPicker(itemText) {
     panel.querySelector('#sgp-save').onclick = () => {
         const checked = panel.querySelector('input[name="sgp"]:checked');
         if (!checked) return;
-        customReplyGroups.forEach(g => { if (g.items) g.items = g.items.filter(t => t !== itemText); });
+        groups.forEach(g => { if (g.items) g.items = g.items.filter(t => t !== itemText); });
         if (checked.value !== '') {
             const idx = parseInt(checked.value);
-            if (!customReplyGroups[idx].items) customReplyGroups[idx].items = [];
-            customReplyGroups[idx].items.push(itemText);
+            if (!groups[idx].items) groups[idx].items = [];
+            groups[idx].items.push(itemText);
         }
         throttledSaveData();
         overlay.remove();
@@ -1132,11 +1275,14 @@ function _showSingleItemGroupPicker(itemText) {
 }
 
 function _showBatchGroupPicker() {
-    if (!customReplyGroups || customReplyGroups.length === 0) {
-        if (confirm('还没有分组，是否立即创建？')) { _showGroupEditor(null); return; }
+    const ctx = _getGroupCtx();
+    const groups = ctx.groups;
+    const sourceItems = ctx.items;
+    if (!groups || groups.length === 0) {
+        if (confirm('还没有分组，是否立即创建？')) { _showGroupEditor(null, ctx); return; }
         return;
     }
-    const selectedItems = [..._batchSelectedIndices].map(i => customReplies[i]);
+    const selectedItems = [..._batchSelectedIndices].map(i => sourceItems[i]);
     const overlay = _makeOverlay();
 
     const panel = document.createElement('div');
@@ -1149,13 +1295,13 @@ function _showBatchGroupPicker() {
     panel.innerHTML = `
         <style>@keyframes popIn { from{opacity:0;transform:scale(.93)} to{opacity:1;transform:scale(1)} }</style>
         <div style="font-size:15px;font-weight:700;color:var(--text-primary);margin-bottom:4px;">批量分组</div>
-        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:14px;">将 <strong style="color:var(--text-primary);">${selectedItems.length}</strong> 条字卡移入分组</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:14px;">将 <strong style="color:var(--text-primary);">${selectedItems.length}</strong> 条内容移入分组</div>
         <div style="display:flex;flex-direction:column;gap:7px;max-height:50vh;overflow-y:auto;margin-bottom:14px;">
             <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;border-radius:11px;border:1.5px solid var(--border-color);background:var(--primary-bg);">
                 <input type="radio" name="bgp" value="" checked style="accent-color:var(--accent-color);">
                 <span style="font-size:13px;color:var(--text-secondary);">移出所有分组</span>
             </label>
-            ${customReplyGroups.map((g, i) => `
+            ${groups.map((g, i) => `
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;border-radius:11px;border:1.5px solid var(--border-color);background:var(--primary-bg);">
                     <input type="radio" name="bgp" value="${i}" style="accent-color:${g.color};">
                     <span style="width:9px;height:9px;border-radius:50%;background:${g.color||'#aaa'};flex-shrink:0;"></span>
@@ -1177,32 +1323,33 @@ function _showBatchGroupPicker() {
     panel.querySelector('#bgp-save').onclick = () => {
         const checked = panel.querySelector('input[name="bgp"]:checked');
         if (!checked) return;
-        customReplyGroups.forEach(g => { if (g.items) g.items = g.items.filter(t => !selectedItems.includes(t)); });
+        groups.forEach(g => { if (g.items) g.items = g.items.filter(t => !selectedItems.includes(t)); });
         if (checked.value !== '') {
             const idx = parseInt(checked.value);
-            if (!customReplyGroups[idx].items) customReplyGroups[idx].items = [];
+            if (!groups[idx].items) groups[idx].items = [];
             selectedItems.forEach(item => {
-                if (!customReplyGroups[idx].items.includes(item)) customReplyGroups[idx].items.push(item);
+                if (!groups[idx].items.includes(item)) groups[idx].items.push(item);
             });
         }
         throttledSaveData();
         _batchSelectedIndices.clear();
         overlay.remove();
         renderReplyLibrary();
-        showNotification(`✓ 已为 ${selectedItems.length} 条字卡分组`, 'success');
+        showNotification(`✓ 已为 ${selectedItems.length} 条内容分组`, 'success');
     };
 }
 
 function deleteItem(index) {
     if (!confirm('确定删除吗？')) return;
-    const item = (currentMajorTab === 'reply' && currentSubTab === 'custom') ? customReplies[index] : null;
+    const ctx = _getGroupCtx();
+    const item = _tabHasGroups() ? ctx.items[index] : null;
     if (currentMajorTab === 'reply' && currentSubTab === 'custom') customReplies.splice(index, 1);
     else if (currentSubTab === 'pokes') customPokes.splice(index, 1);
     else if (currentSubTab === 'statuses') customStatuses.splice(index, 1);
     else if (currentSubTab === 'mottos') customMottos.splice(index, 1);
     else if (currentSubTab === 'intros') customIntros.splice(index, 1);
-    if (item && customReplyGroups) {
-        customReplyGroups.forEach(g => { if (g.items) g.items = g.items.filter(t => t !== item); });
+    if (item && ctx.groups) {
+        ctx.groups.forEach(g => { if (g.items) g.items = g.items.filter(t => t !== item); });
     }
     throttledSaveData();
     renderReplyLibrary();
@@ -1221,10 +1368,13 @@ function editItem(index, oldText) {
         newText = prompt('修改内容:', oldText);
     }
     if (newText === null || newText.trim() === '') return;
-    if (customReplyGroups && currentMajorTab === 'reply' && currentSubTab === 'custom') {
-        customReplyGroups.forEach(g => {
-            if (g.items) { const i = g.items.indexOf(oldText); if (i >= 0) g.items[i] = newText.trim(); }
-        });
+    if (_tabHasGroups()) {
+        const ctx = _getGroupCtx();
+        if (ctx.groups) {
+            ctx.groups.forEach(g => {
+                if (g.items) { const i = g.items.indexOf(oldText); if (i >= 0) g.items[i] = newText.trim(); }
+            });
+        }
     }
     if (currentMajorTab === 'reply' && currentSubTab === 'custom') customReplies[index] = newText.trim();
     else if (currentSubTab === 'pokes') customPokes[index] = newText.trim();
@@ -1246,17 +1396,53 @@ function renderEmptyState(text) {
 }
 
 function _showExportUI() {
+    // 读取公告数据（localStorage）
+    let _annCustomData = {};
+    let _annStatusPool = [];
+    try { _annCustomData = JSON.parse(localStorage.getItem('dg_custom_data') || '{}'); } catch(e) {}
+    try { _annStatusPool = JSON.parse(localStorage.getItem('dg_status_pool') || '[]'); } catch(e) {}
+    const _annTextCount = (_annCustomData.titles || []).length + (_annCustomData.notes || []).length;
+    const _annPoolCount = _annStatusPool.length;
+    const _annTotalCount = _annTextCount + _annPoolCount;
+
     const modules = [
-        { id: '_re_replies',  icon: ICONS.comment,   label: '主字卡',    count: customReplies.length,          key: 'customReplies' },
-        { id: '_re_pokes',    icon: ICONS.hand,      label: '拍一拍',    count: customPokes.length,            key: 'customPokes' },
-        { id: '_re_statuses', icon: ICONS.dot,       label: '对方状态',  count: customStatuses.length,         key: 'customStatuses' },
-        { id: '_re_mottos',   icon: ICONS.quote,     label: '顶部格言',  count: customMottos.length,           key: 'customMottos' },
-        { id: '_re_intros',   icon: ICONS.play,      label: '开场动画',  count: customIntros.length,           key: 'customIntros' },
-        { id: '_re_emojis',   icon: ICONS.smile,     label: 'Emoji 库',  count: customEmojis.length,           key: 'customEmojis' },
-        { id: '_re_groups',   icon: ICONS.folderBig, label: '字卡分组',  count: (customReplyGroups||[]).length, key: 'customReplyGroups', extra: true },
+        { id: '_re_replies',  icon: ICONS.comment,   label: '主字卡',        count: customReplies.length,                     key: 'customReplies' },
+        { id: '_re_pokes',    icon: ICONS.hand,      label: '拍一拍',        count: customPokes.length,                       key: 'customPokes' },
+        { id: '_re_statuses', icon: ICONS.dot,       label: '对方状态',      count: customStatuses.length,                    key: 'customStatuses' },
+        { id: '_re_mottos',   icon: ICONS.quote,     label: '顶部格言',      count: customMottos.length,                      key: 'customMottos' },
+        { id: '_re_intros',   icon: ICONS.play,      label: '开场动画',      count: customIntros.length,                      key: 'customIntros' },
+        { id: '_re_emojis',   icon: ICONS.smile,     label: 'Emoji 库',      count: customEmojis.length,                      key: 'customEmojis' },
+        { id: '_re_ann',      icon: ICONS.folderBig, label: '今日公告配置',  count: _annTotalCount,                           key: 'announcementConfig' },
+        { id: '_re_groups',   icon: ICONS.folderBig, label: '字卡分组',      count: (customReplyGroups||[]).length,            key: 'customReplyGroups',  extra: true },
+        { id: '_re_pokg',     icon: ICONS.folderBig, label: '拍一拍分组',    count: (window.customPokeGroups||[]).length,     key: 'customPokeGroups',   extra: true },
+        { id: '_re_statg',    icon: ICONS.folderBig, label: '对方状态分组',  count: (window.customStatusGroups||[]).length,   key: 'customStatusGroups', extra: true },
     ];
 
-    if (customReplyGroups && customReplyGroups.length > 0) {
+    // 检测当前 tab 决定哪个分组有「按分组导出」选项
+    const replyGroupsExist  = customReplyGroups        && customReplyGroups.length > 0;
+    const pokeGroupsExist   = window.customPokeGroups  && window.customPokeGroups.length > 0;
+    const statusGroupsExist = window.customStatusGroups && window.customStatusGroups.length > 0;
+    const onAnnTab          = currentMajorTab === 'announcement';
+    const anyGroupExists    = replyGroupsExist || pokeGroupsExist || statusGroupsExist || onAnnTab;
+
+    // 根据当前 tab 决定「按分组导出」对应哪个类型
+    const onPokeTab   = currentMajorTab === 'atmosphere' && currentSubTab === 'pokes';
+    const onStatusTab = currentMajorTab === 'atmosphere' && currentSubTab === 'statuses';
+    let groupExportType = null;
+    if (onAnnTab)                          groupExportType = 'announcement';
+    if (onPokeTab   && pokeGroupsExist)    groupExportType = 'pokes';
+    if (onStatusTab && statusGroupsExist)  groupExportType = 'statuses';
+    // 只有在字卡 tab（非拍一拍/状态/公告 tab）时才 fallback 到字卡分组
+    if (!groupExportType && !onPokeTab && !onStatusTab && !onAnnTab && replyGroupsExist) groupExportType = 'replies';
+
+    const groupDescMap = {
+        replies:      '仅导出指定分组的字卡内容',
+        pokes:        '仅导出指定分组的拍一拍内容',
+        statuses:     '仅导出指定分组的对方状态内容',
+        announcement: '选择要导出的公告内容模块',
+    };
+
+    if (anyGroupExists) {
         const overlay = _makeOverlay();
         const panel = document.createElement('div');
         panel.style.cssText = `
@@ -1283,6 +1469,7 @@ function _showExportUI() {
                         <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">自由选择要导出的模块</div>
                     </div>
                 </button>
+                ${groupExportType ? `
                 <button id="_exp_group_btn" style="
                     display:flex;align-items:center;gap:12px;padding:14px 16px;
                     border:1.5px solid var(--border-color);border-radius:14px;
@@ -1291,9 +1478,9 @@ function _showExportUI() {
                     <div style="width:38px;height:38px;border-radius:10px;background:rgba(var(--accent-color-rgb),0.12);display:flex;align-items:center;justify-content:center;color:var(--accent-color);flex-shrink:0;">${ICONS.folderBig}</div>
                     <div>
                         <div style="font-size:13px;font-weight:600;color:var(--text-primary);">按分组导出</div>
-                        <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">仅导出指定分组的字卡内容</div>
+                        <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">${groupDescMap[groupExportType] || '仅导出指定分组内容'}</div>
                     </div>
-                </button>
+                </button>` : ''}
             </div>
             <button id="_exp_cancel_btn" style="
                 width:100%;margin-top:14px;padding:12px;border:1.5px solid var(--border-color);
@@ -1315,10 +1502,17 @@ function _showExportUI() {
             });
         };
 
-        panel.querySelector('#_exp_group_btn').onclick = () => {
-            overlay.remove();
-            _showGroupExportPicker();
-        };
+        const groupBtn = panel.querySelector('#_exp_group_btn');
+        if (groupBtn) {
+            groupBtn.onclick = () => {
+                overlay.remove();
+                if (groupExportType === 'announcement') {
+                    _showAnnouncementExportPicker();
+                } else {
+                    _showGroupExportPicker(groupExportType);
+                }
+            };
+        }
         return;
     }
 
@@ -1331,20 +1525,39 @@ function _showExportUI() {
 function _doExport(selectedModules) {
     const libraryData = { exportDate: new Date().toISOString(), modules: [] };
     selectedModules.forEach(m => {
-        if (m.key === 'customReplies')       { libraryData.customReplies = customReplies; libraryData.modules.push('replies'); }
-        else if (m.key === 'customPokes')    { libraryData.customPokes = customPokes; libraryData.modules.push('pokes'); }
-        else if (m.key === 'customStatuses') { libraryData.customStatuses = customStatuses; libraryData.modules.push('statuses'); }
-        else if (m.key === 'customMottos')   { libraryData.customMottos = customMottos; libraryData.modules.push('mottos'); }
-        else if (m.key === 'customIntros')   { libraryData.customIntros = customIntros; libraryData.modules.push('intros'); }
-        else if (m.key === 'customEmojis')   { libraryData.customEmojis = customEmojis; libraryData.modules.push('emojis'); }
-        else if (m.key === 'customReplyGroups') { libraryData.customReplyGroups = customReplyGroups; libraryData.modules.push('groups'); }
+        if (m.key === 'customReplies')         { libraryData.customReplies      = customReplies;                  libraryData.modules.push('replies'); }
+        else if (m.key === 'customPokes')      { libraryData.customPokes        = customPokes;                    libraryData.modules.push('pokes'); }
+        else if (m.key === 'customStatuses')   { libraryData.customStatuses     = customStatuses;                 libraryData.modules.push('statuses'); }
+        else if (m.key === 'customMottos')     { libraryData.customMottos       = customMottos;                   libraryData.modules.push('mottos'); }
+        else if (m.key === 'customIntros')     { libraryData.customIntros       = customIntros;                   libraryData.modules.push('intros'); }
+        else if (m.key === 'customEmojis')     { libraryData.customEmojis       = customEmojis;                   libraryData.modules.push('emojis'); }
+        else if (m.key === 'customReplyGroups')  { libraryData.customReplyGroups  = window.customReplyGroups  || []; libraryData.modules.push('groups'); }
+        else if (m.key === 'customPokeGroups')   { libraryData.customPokeGroups   = window.customPokeGroups   || []; libraryData.modules.push('pokeGroups'); }
+        else if (m.key === 'customStatusGroups') { libraryData.customStatusGroups = window.customStatusGroups || []; libraryData.modules.push('statusGroups'); }
+        else if (m.key === 'announcementConfig') {
+            let _acd = {}; let _asp = [];
+            try { _acd = JSON.parse(localStorage.getItem('dg_custom_data') || '{}'); } catch(e) {}
+            try { _asp = JSON.parse(localStorage.getItem('dg_status_pool') || '[]'); } catch(e) {}
+            libraryData.announcementConfig = { customData: _acd, statusPool: _asp };
+            libraryData.modules.push('announcementConfig');
+        }
     });
     const fileName = `reply-library-${libraryData.modules.join('+')}-${new Date().toISOString().slice(0,10)}.json`;
     exportDataToMobileOrPC(JSON.stringify(libraryData, null, 2), fileName);
     showNotification('✓ 字卡导出成功', 'success');
 }
 
-function _showGroupExportPicker() {
+function _showGroupExportPicker(type) {
+    // type: 'replies' | 'pokes' | 'statuses'
+    type = type || 'replies';
+
+    const cfgMap = {
+        replies:  { groups: window.customReplyGroups  || [], items: customReplies,   groupKey: 'customReplyGroups',  itemKey: 'customReplies',  moduleTag: ['replies','groups'],       filePrefix: 'reply-groups',  label: '字卡',    successUnit: '条字卡' },
+        pokes:    { groups: window.customPokeGroups   || [], items: customPokes,      groupKey: 'customPokeGroups',   itemKey: 'customPokes',    moduleTag: ['pokes','pokeGroups'],     filePrefix: 'poke-groups',   label: '拍一拍',  successUnit: '条拍一拍' },
+        statuses: { groups: window.customStatusGroups || [], items: customStatuses,   groupKey: 'customStatusGroups', itemKey: 'customStatuses', moduleTag: ['statuses','statusGroups'],filePrefix: 'status-groups', label: '对方状态',successUnit: '条状态' },
+    };
+    const cfg = cfgMap[type] || cfgMap.replies;
+
     const overlay = _makeOverlay();
     const panel = document.createElement('div');
     panel.style.cssText = `
@@ -1359,7 +1572,7 @@ function _showGroupExportPicker() {
         <div style="font-size:16px;font-weight:700;color:var(--text-primary);display:flex;align-items:center;gap:8px;">
             ${ICONS.folderBig} 选择分组导出
         </div>
-        <div style="font-size:12px;color:var(--text-secondary);">勾选要导出的分组，仅导出这些分组的字卡</div>
+        <div style="font-size:12px;color:var(--text-secondary);">勾选要导出的分组，仅导出这些分组的${cfg.label}</div>
         <div id="_gep_list" style="display:flex;flex-direction:column;gap:8px;overflow-y:auto;max-height:50vh;"></div>
         <div style="display:flex;gap:10px;">
             <button id="_gep_cancel" style="flex:1;padding:12px;border:1.5px solid var(--border-color);border-radius:13px;background:none;color:var(--text-secondary);font-size:13px;cursor:pointer;font-family:var(--font-family);">取消</button>
@@ -1372,8 +1585,8 @@ function _showGroupExportPicker() {
     document.body.appendChild(overlay);
 
     const listEl = panel.querySelector('#_gep_list');
-    customReplyGroups.forEach((g, i) => {
-        const cnt = (g.items || []).filter(t => customReplies.includes(t)).length;
+    cfg.groups.forEach((g, i) => {
+        const cnt = (g.items || []).filter(t => cfg.items.includes(t)).length;
         const row = document.createElement('label');
         row.style.cssText = `display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:13px;border:1.5px solid var(--border-color);background:var(--primary-bg);cursor:pointer;transition:border-color 0.15s;`;
         row.innerHTML = `
@@ -1392,62 +1605,125 @@ function _showGroupExportPicker() {
         const checked = [...panel.querySelectorAll('input[type=checkbox]:checked')].map(cb => parseInt(cb.value));
         if (!checked.length) { showNotification('请至少选择一个分组', 'warning'); return; }
 
-        const selectedGroups = checked.map(i => customReplyGroups[i]);
+        const selectedGroups = checked.map(i => cfg.groups[i]);
         const allItems = new Set();
         const exportGroups = [];
         selectedGroups.forEach(g => {
-            const items = (g.items || []).filter(t => customReplies.includes(t));
+            const items = (g.items || []).filter(t => cfg.items.includes(t));
             items.forEach(t => allItems.add(t));
             exportGroups.push({ ...g, items });
         });
 
         const libraryData = {
             exportDate: new Date().toISOString(),
-            modules: ['replies', 'groups'],
-            customReplies: [...allItems],
-            customReplyGroups: exportGroups,
-            _groupExport: true
+            modules: cfg.moduleTag,
+            [cfg.itemKey]:  [...allItems],
+            [cfg.groupKey]: exportGroups,
+            _groupExport: true,
+            _groupExportType: type
         };
         const groupNames = selectedGroups.map(g => g.name).join('+');
-        const fileName = `reply-groups-${groupNames}-${new Date().toISOString().slice(0,10)}.json`;
+        const fileName = `${cfg.filePrefix}-${groupNames}-${new Date().toISOString().slice(0,10)}.json`;
         exportDataToMobileOrPC(JSON.stringify(libraryData, null, 2), fileName);
         overlay.remove();
-        showNotification(`✓ 已导出 ${checked.length} 个分组，共 ${allItems.size} 条字卡`, 'success');
+        showNotification(`✓ 已导出 ${checked.length} 个分组，共 ${allItems.size} ${cfg.successUnit}`, 'success');
     };
 }
 
-/**
- * 宽容JSON解析器：自动修复常见语法问题（尾随逗号、缺失逗号等）
- */
+function _showAnnouncementExportPicker() {
+    let annCustomData = {};
+    let annStatusPool = [];
+    try { annCustomData = JSON.parse(localStorage.getItem('dg_custom_data') || '{}'); } catch(e) {}
+    try { annStatusPool = JSON.parse(localStorage.getItem('dg_status_pool') || '[]'); } catch(e) {}
+    const textCount = (annCustomData.titles || []).length + (annCustomData.notes || []).length;
+    const poolCount = annStatusPool.length;
+
+    const options = [
+        { id: '_aep_text', label: '公告文案', desc: `${textCount} 条内容`, key: 'announcementText', hasData: textCount > 0 },
+        { id: '_aep_pool', label: '状态随机库', desc: `${poolCount} 条条目`, key: 'announcementStatusPool', hasData: poolCount > 0 },
+    ];
+
+    const overlay = _makeOverlay();
+    const panel = document.createElement('div');
+    panel.style.cssText = `
+        background:var(--secondary-bg);border-radius:22px;padding:24px;
+        width:92%;max-width:380px;
+        box-shadow:0 24px 80px rgba(0,0,0,.45);
+        animation:popIn 0.22s cubic-bezier(.34,1.56,.64,1);
+        display:flex;flex-direction:column;gap:14px;
+    `;
+    panel.innerHTML = `
+        <style>@keyframes popIn{from{opacity:0;transform:scale(.93)}to{opacity:1;transform:scale(1)}}</style>
+        <div style="font-size:16px;font-weight:700;color:var(--text-primary);display:flex;align-items:center;gap:8px;">
+            ${ICONS.folderBig} 选择导出内容
+        </div>
+        <div style="font-size:12px;color:var(--text-secondary);">勾选要导出的公告模块</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+            ${options.map(opt => `
+                <label style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:13px;border:1.5px solid var(--border-color);background:var(--primary-bg);cursor:pointer;">
+                    <input type="checkbox" id="${opt.id}" ${opt.hasData ? 'checked' : ''} style="width:16px;height:16px;accent-color:var(--accent-color);flex-shrink:0;">
+                    <div style="flex:1;">
+                        <div style="font-size:13px;font-weight:600;color:var(--text-primary);">${opt.label}</div>
+                        <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">${opt.desc}</div>
+                    </div>
+                </label>
+            `).join('')}
+        </div>
+        <div style="display:flex;gap:10px;">
+            <button id="_aep_cancel" style="flex:1;padding:12px;border:1.5px solid var(--border-color);border-radius:13px;background:none;color:var(--text-secondary);font-size:13px;cursor:pointer;font-family:var(--font-family);">取消</button>
+            <button id="_aep_confirm" style="flex:2;padding:12px;border:none;border-radius:13px;background:var(--accent-color);color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font-family);display:flex;align-items:center;justify-content:center;gap:8px;">
+                ${ICONS.export} 导出
+            </button>
+        </div>
+    `;
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    panel.querySelector('#_aep_cancel').onclick = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+    panel.querySelector('#_aep_confirm').onclick = () => {
+        const selected = options.filter(opt => panel.querySelector('#' + opt.id)?.checked);
+        if (!selected.length) { showNotification('请至少选择一项', 'warning'); return; }
+
+        const libraryData = { exportDate: new Date().toISOString(), modules: [] };
+        selected.forEach(opt => {
+            if (opt.key === 'announcementText') {
+                libraryData.announcementText = { titles: annCustomData.titles || [], notes: annCustomData.notes || [] };
+                libraryData.modules.push('announcementText');
+            } else if (opt.key === 'announcementStatusPool') {
+                libraryData.announcementStatusPool = annStatusPool;
+                libraryData.modules.push('announcementStatusPool');
+            }
+        });
+        const fileName = `announcement-${libraryData.modules.join('+')}-${new Date().toISOString().slice(0,10)}.json`;
+        exportDataToMobileOrPC(JSON.stringify(libraryData, null, 2), fileName);
+        overlay.remove();
+        showNotification(`✓ 已导出 ${selected.map(o => o.label).join('、')}`, 'success');
+    };
+}
+
 function _parseFlexibleJSON(text) {
-    // First try strict parse
     try { return JSON.parse(text); } catch (_) {}
-    // Repair: remove trailing commas before ] or }
     let repaired = text
-        .replace(/,\s*([}\]])/g, '$1')      // trailing commas
-        .replace(/(["\d\w}])\s*\n\s*"/g, (m, p1) => {  // missing commas between string items
+        .replace(/,\s*([}\]])/g, '$1')  
+        .replace(/(["\d\w}])\s*\n\s*"/g, (m, p1) => { 
             if (p1 === '}' || p1 === ']') return m;
             return p1 + ',\n"';
         });
     try { return JSON.parse(repaired); } catch (_) {}
-    // More aggressive repair: fix missing commas between quoted strings on consecutive lines
     repaired = text.replace(/("(?:[^"\\]|\\.)*")\s*\n(\s*")/g, '$1,\n$2')
                    .replace(/,\s*([}\]])/g, '$1');
     return JSON.parse(repaired);
 }
 
-/**
- * 旧格式兼容转换：将旧版导出的字卡文件规范化为当前格式
- * 旧格式特征：有 exportDate 或 modules 字段
- * 新格式特征：有 version 字段
- */
 function _normalizeImportData(data) {
     if (!data || typeof data !== 'object') return data;
-    // Already new format with known keys
-    const knownKeys = ['customReplies','customPokes','customStatuses','customMottos','customIntros','customEmojis','customReplyGroups','disabledDefaultReplies'];
-    const hasNewFormat = knownKeys.some(k => Array.isArray(data[k]));
+    const knownKeys = ['customReplies','customPokes','customStatuses','customMottos','customIntros','customEmojis',
+                       'customReplyGroups','customPokeGroups','customStatusGroups','disabledDefaultReplies',
+                       'announcementConfig','announcementText','announcementStatusPool'];
+    const hasNewFormat = knownKeys.some(k => data[k] !== undefined && data[k] !== null);
     if (hasNewFormat) return data;
-    // Old format: might have different structure or just plain array
     if (Array.isArray(data)) {
         return { customReplies: data };
     }
@@ -1455,19 +1731,36 @@ function _normalizeImportData(data) {
 }
 
 function _showImportUI(data) {
-    const knownFields = ['customReplies','customPokes','customStatuses','customMottos','customIntros','customEmojis','customReplyGroups'];
-    const hasValid = knownFields.some(f => Array.isArray(data[f]));
+    const knownFields = ['customReplies','customPokes','customStatuses','customMottos','customIntros','customEmojis',
+                         'customReplyGroups','customPokeGroups','customStatusGroups',
+                         'announcementConfig','announcementText','announcementStatusPool'];
+    const hasValid = knownFields.some(f => data[f] !== undefined && data[f] !== null);
     if (!hasValid) { showNotification('无效的字卡备份文件', 'error'); return; }
 
+    // 计算公告模块的 displayCount
+    const _annCfg = data.announcementConfig;
+    const _annText = data.announcementText;
+    const _annPool = data.announcementStatusPool;
+    const _annCfgCount = _annCfg
+        ? ((_annCfg.customData?.titles||[]).length + (_annCfg.customData?.notes||[]).length + (_annCfg.statusPool||[]).length)
+        : undefined;
+    const _annTextCount = _annText ? ((_annText.titles||[]).length + (_annText.notes||[]).length) : undefined;
+    const _annPoolCount = Array.isArray(_annPool) ? _annPool.length : undefined;
+
     const modules = [
-        { id: '_ri_replies',  icon: ICONS.comment,   label: '主字卡',    data: data.customReplies,     key: 'customReplies' },
-        { id: '_ri_pokes',    icon: ICONS.hand,      label: '拍一拍',    data: data.customPokes,       key: 'customPokes' },
-        { id: '_ri_statuses', icon: ICONS.dot,       label: '对方状态',  data: data.customStatuses,    key: 'customStatuses' },
-        { id: '_ri_mottos',   icon: ICONS.quote,     label: '顶部格言',  data: data.customMottos,      key: 'customMottos' },
-        { id: '_ri_intros',   icon: ICONS.play,      label: '开场动画',  data: data.customIntros,      key: 'customIntros' },
-        { id: '_ri_emojis',   icon: ICONS.smile,     label: 'Emoji 库',  data: data.customEmojis,      key: 'customEmojis' },
-        { id: '_ri_groups',   icon: ICONS.folderBig, label: '字卡分组',  data: data.customReplyGroups, key: 'customReplyGroups', extra: true },
-    ].filter(m => Array.isArray(m.data));
+        { id: '_ri_replies',  icon: ICONS.comment,   label: '主字卡',        data: data.customReplies,       key: 'customReplies' },
+        { id: '_ri_pokes',    icon: ICONS.hand,      label: '拍一拍',        data: data.customPokes,         key: 'customPokes' },
+        { id: '_ri_statuses', icon: ICONS.dot,       label: '对方状态',      data: data.customStatuses,      key: 'customStatuses' },
+        { id: '_ri_mottos',   icon: ICONS.quote,     label: '顶部格言',      data: data.customMottos,        key: 'customMottos' },
+        { id: '_ri_intros',   icon: ICONS.play,      label: '开场动画',      data: data.customIntros,        key: 'customIntros' },
+        { id: '_ri_emojis',   icon: ICONS.smile,     label: 'Emoji 库',      data: data.customEmojis,        key: 'customEmojis' },
+        { id: '_ri_ann',      icon: ICONS.folderBig, label: '今日公告配置',  data: [_annCfg],                key: 'announcementConfig',    displayCount: _annCfgCount },
+        { id: '_ri_anntext',  icon: ICONS.comment,   label: '公告文案',      data: [_annText],               key: 'announcementText',      displayCount: _annTextCount },
+        { id: '_ri_annpool',  icon: ICONS.dot,       label: '状态随机库',    data: _annPool,                 key: 'announcementStatusPool', displayCount: _annPoolCount },
+        { id: '_ri_groups',   icon: ICONS.folderBig, label: '字卡分组',      data: data.customReplyGroups,   key: 'customReplyGroups',  extra: true },
+        { id: '_ri_pokg',     icon: ICONS.folderBig, label: '拍一拍分组',    data: data.customPokeGroups,    key: 'customPokeGroups',   extra: true },
+        { id: '_ri_statg',    icon: ICONS.folderBig, label: '对方状态分组',  data: data.customStatusGroups,  key: 'customStatusGroups', extra: true },
+    ].filter(m => m.data !== undefined && m.data !== null && (Array.isArray(m.data) ? m.data.length > 0 && m.data[0] !== undefined : true));
 
     _showIOSheet(`导入字卡`, `文件中包含 ${modules.length} 个模块`, modules, ICONS.import, (selected, mode) => {
         if (!selected.length) { showNotification('请至少选择一项', 'error'); return; }
@@ -1476,13 +1769,27 @@ function _showImportUI(data) {
             let totalAdded = 0;
             if (overwrite) {
                 selected.forEach(m => {
-                    if (m.key === 'customReplies') { customReplies = data.customReplies; totalAdded += data.customReplies.length; }
-                    else if (m.key === 'customPokes') { customPokes = data.customPokes; totalAdded += data.customPokes.length; }
-                    else if (m.key === 'customStatuses') { customStatuses = data.customStatuses; totalAdded += data.customStatuses.length; }
-                    else if (m.key === 'customMottos') { customMottos = data.customMottos; totalAdded += data.customMottos.length; }
-                    else if (m.key === 'customIntros') { customIntros = data.customIntros; totalAdded += data.customIntros.length; }
-                    else if (m.key === 'customEmojis') { customEmojis = data.customEmojis; }
-                    else if (m.key === 'customReplyGroups') { window.customReplyGroups = data.customReplyGroups; }
+                    if (m.key === 'customReplies')         { customReplies               = data.customReplies;       totalAdded += data.customReplies.length; }
+                    else if (m.key === 'customPokes')      { customPokes                 = data.customPokes;         totalAdded += data.customPokes.length; }
+                    else if (m.key === 'customStatuses')   { customStatuses              = data.customStatuses;      totalAdded += data.customStatuses.length; }
+                    else if (m.key === 'customMottos')     { customMottos                = data.customMottos;        totalAdded += data.customMottos.length; }
+                    else if (m.key === 'customIntros')     { customIntros                = data.customIntros;        totalAdded += data.customIntros.length; }
+                    else if (m.key === 'customEmojis')     { customEmojis                = data.customEmojis; }
+                    else if (m.key === 'customReplyGroups')  { window.customReplyGroups  = data.customReplyGroups; }
+                    else if (m.key === 'customPokeGroups')   { window.customPokeGroups   = data.customPokeGroups; }
+                    else if (m.key === 'customStatusGroups') { window.customStatusGroups = data.customStatusGroups; }
+                    else if (m.key === 'announcementConfig') {
+                        if (_annCfg.customData) localStorage.setItem('dg_custom_data', JSON.stringify(_annCfg.customData));
+                        if (_annCfg.statusPool) localStorage.setItem('dg_status_pool', JSON.stringify(_annCfg.statusPool));
+                    }
+                    else if (m.key === 'announcementText') {
+                        let cur = {}; try { cur = JSON.parse(localStorage.getItem('dg_custom_data') || '{}'); } catch(e) {}
+                        cur.titles = _annText.titles || []; cur.notes = _annText.notes || [];
+                        localStorage.setItem('dg_custom_data', JSON.stringify(cur));
+                    }
+                    else if (m.key === 'announcementStatusPool') {
+                        localStorage.setItem('dg_status_pool', JSON.stringify(_annPool));
+                    }
                 });
             } else {
                 selected.forEach(m => {
@@ -1513,11 +1820,46 @@ function _showImportUI(data) {
                         data.customReplyGroups.forEach(dg => {
                             if (!customReplyGroups.find(g => g.name === dg.name)) customReplyGroups.push(dg);
                         });
+                    } else if (m.key === 'customPokeGroups') {
+                        if (!window.customPokeGroups) window.customPokeGroups = [];
+                        data.customPokeGroups.forEach(dg => {
+                            if (!window.customPokeGroups.find(g => g.name === dg.name)) window.customPokeGroups.push(dg);
+                        });
+                    } else if (m.key === 'customStatusGroups') {
+                        if (!window.customStatusGroups) window.customStatusGroups = [];
+                        data.customStatusGroups.forEach(dg => {
+                            if (!window.customStatusGroups.find(g => g.name === dg.name)) window.customStatusGroups.push(dg);
+                        });
+                    } else if (m.key === 'announcementConfig') {
+                        // 追加：合并 titles/notes，pool 去重追加
+                        let cur = {}; try { cur = JSON.parse(localStorage.getItem('dg_custom_data') || '{}'); } catch(e) {}
+                        if (_annCfg.customData) {
+                            cur.titles = [...new Set([...(cur.titles||[]), ...(_annCfg.customData.titles||[])])];
+                            cur.notes  = [...new Set([...(cur.notes||[]),  ...(_annCfg.customData.notes||[])])];
+                            localStorage.setItem('dg_custom_data', JSON.stringify(cur));
+                        }
+                        if (_annCfg.statusPool) {
+                            let pool = []; try { pool = JSON.parse(localStorage.getItem('dg_status_pool') || '[]'); } catch(e) {}
+                            const existStatuses = new Set(pool.map(p => p.status));
+                            _annCfg.statusPool.forEach(p => { if (!existStatuses.has(p.status)) pool.push(p); });
+                            localStorage.setItem('dg_status_pool', JSON.stringify(pool));
+                        }
+                    } else if (m.key === 'announcementText') {
+                        let cur = {}; try { cur = JSON.parse(localStorage.getItem('dg_custom_data') || '{}'); } catch(e) {}
+                        cur.titles = [...new Set([...(cur.titles||[]), ...(_annText.titles||[])])];
+                        cur.notes  = [...new Set([...(cur.notes||[]),  ...(_annText.notes||[])])];
+                        localStorage.setItem('dg_custom_data', JSON.stringify(cur));
+                    } else if (m.key === 'announcementStatusPool') {
+                        let pool = []; try { pool = JSON.parse(localStorage.getItem('dg_status_pool') || '[]'); } catch(e) {}
+                        const existStatuses = new Set(pool.map(p => p.status));
+                        _annPool.forEach(p => { if (!existStatuses.has(p.status)) pool.push(p); });
+                        localStorage.setItem('dg_status_pool', JSON.stringify(pool));
                     }
                 });
             }
             throttledSaveData();
             if (typeof renderReplyLibrary === 'function') renderReplyLibrary();
+            if (typeof window.renderAnnStatusPool === 'function') window.renderAnnStatusPool();
             showNotification(`✓ 导入成功（${overwrite ? '覆盖' : '追加'}）${totalAdded > 0 ? `，共 ${totalAdded} 条` : ''}`, 'success', 3000);
         } catch (err) {
             console.error('字卡导入失败:', err);
@@ -1584,7 +1926,7 @@ function _showIOSheet(title, subtitle, modules, icon, onConfirm, showMode = fals
                         <div class="io-icon-box">${m.icon}</div>
                         <div style="flex:1;">
                             <div style="font-size:13px;font-weight:600;color:var(--text-primary);">${m.label}</div>
-                            <div style="font-size:11px;color:var(--text-secondary);">${m.data ? m.data.length : m.count} 条${m.extra ? ' · 含分组结构' : ''}</div>
+                            <div style="font-size:11px;color:var(--text-secondary);">${m.displayCount !== undefined ? m.displayCount : (m.data ? m.data.length : m.count)} 条${m.extra ? ' · 含分组结构' : ''}</div>
                         </div>
                         <div class="io-toggle" data-id="${m.id}"><div class="knob"></div></div>
                         <input type="checkbox" id="${m.id}" checked style="display:none;">
@@ -1644,48 +1986,78 @@ function _makeOverlay() {
 }
 
 function _showBatchAddDialog() {
+    const ctx = _getGroupCtx();
+    const groups = ctx.groups;
     const overlay = _makeOverlay();
     const panel = document.createElement('div');
     panel.style.cssText = `
         background:var(--secondary-bg);border-radius:22px;padding:24px;
         width:92%;max-width:420px;
+        max-height:88vh;
+        display:flex;flex-direction:column;
         box-shadow:0 24px 80px rgba(0,0,0,.45);
         animation:popIn 0.22s cubic-bezier(.34,1.56,.64,1);
     `;
+
+    const hasGroups = groups && groups.length > 0;
+    const groupPillsHTML = hasGroups ? `
+        <button class="ba-grp-pill" data-gidx="-1" style="
+            padding:5px 13px;border-radius:20px;font-size:12px;font-family:var(--font-family);cursor:pointer;
+            border:1.5px solid var(--accent-color);background:var(--accent-color);color:#fff;font-weight:700;
+            flex-shrink:0;transition:all .15s;
+        ">不分组</button>
+        ${groups.map((g, i) => `
+        <button class="ba-grp-pill" data-gidx="${i}" style="
+            padding:5px 13px;border-radius:20px;font-size:12px;font-family:var(--font-family);cursor:pointer;
+            border:1.5px solid ${g.color}44;background:${g.color}18;color:${g.color};font-weight:600;
+            flex-shrink:0;transition:all .15s;
+        ">
+            <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${g.color};margin-right:4px;vertical-align:middle;"></span>${g.name}
+        </button>`).join('')}
+    ` : '';
+
     panel.innerHTML = `
-        <style>@keyframes popIn { from{opacity:0;transform:scale(.93)} to{opacity:1;transform:scale(1)} }</style>
-        <div style="font-size:16px;font-weight:700;color:var(--text-primary);margin-bottom:6px;">批量添加字卡</div>
-        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:14px;line-height:1.6;">每行一条，自动去重</div>
-        <textarea id="batch-add-input" rows="10" placeholder="在此粘贴内容，每行一条…" style="
-            width:100%;box-sizing:border-box;padding:12px 14px;
-            border:1.5px solid var(--border-color);border-radius:13px;
-            background:var(--primary-bg);color:var(--text-primary);
-            font-size:13px;font-family:var(--font-family);outline:none;resize:vertical;
-            line-height:1.6;transition:border 0.18s;
-        "></textarea>
-        <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;margin-bottom:12px;">
-            <span id="batch-add-count">0 条</span>
-        </div>
-        ${(customReplyGroups && customReplyGroups.length > 0) ? `
-        <div style="margin-bottom:16px;">
-            <div style="font-size:11px;font-weight:700;color:var(--text-secondary);letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">添加到分组</div>
-            <div id="ba-group-list" style="display:flex;flex-wrap:wrap;gap:7px;">
-                <button class="ba-grp-pill" data-gidx="-1" style="
-                    padding:5px 13px;border-radius:20px;font-size:12px;font-family:var(--font-family);cursor:pointer;
-                    border:1.5px solid var(--accent-color);background:var(--accent-color);color:#fff;font-weight:700;
-                    transition:all .15s;
-                ">不分组</button>
-                ${customReplyGroups.map((g, i) => `
-                <button class="ba-grp-pill" data-gidx="${i}" style="
-                    padding:5px 13px;border-radius:20px;font-size:12px;font-family:var(--font-family);cursor:pointer;
-                    border:1.5px solid ${g.color}44;background:${g.color}18;color:${g.color};font-weight:600;
-                    transition:all .15s;
-                ">
-                    <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${g.color};margin-right:4px;vertical-align:middle;"></span>${g.name}
-                </button>`).join('')}
+        <style>
+            @keyframes popIn { from{opacity:0;transform:scale(.93)} to{opacity:1;transform:scale(1)} }
+            @keyframes baGroupSlide { from{opacity:0;transform:translateY(-6px)} to{opacity:1;transform:translateY(0)} }
+        </style>
+        <div style="flex-shrink:0;font-size:16px;font-weight:700;color:var(--text-primary);margin-bottom:6px;">批量添加${getCategoryName(currentSubTab)}</div>
+        <div style="flex-shrink:0;font-size:12px;color:var(--text-secondary);margin-bottom:14px;line-height:1.6;">每行一条，自动去重</div>
+
+        <div style="flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;">
+            <textarea id="batch-add-input" rows="10" placeholder="在此粘贴内容，每行一条…" style="
+                width:100%;box-sizing:border-box;padding:12px 14px;
+                border:1.5px solid var(--border-color);border-radius:13px;
+                background:var(--primary-bg);color:var(--text-primary);
+                font-size:13px;font-family:var(--font-family);outline:none;resize:vertical;
+                line-height:1.6;transition:border 0.18s;
+            "></textarea>
+            <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;margin-bottom:12px;">
+                <span id="batch-add-count">0 条</span>
             </div>
-        </div>` : ''}
-        <div style="display:flex;gap:10px;">
+
+            ${hasGroups ? `
+            <div id="ba-group-section" style="margin-bottom:4px;">
+                <button id="ba-group-toggle" style="
+                    display:flex;align-items:center;gap:7px;width:100%;
+                    padding:9px 12px;border-radius:11px;cursor:pointer;
+                    border:1.5px solid var(--border-color);background:var(--primary-bg);
+                    color:var(--text-secondary);font-size:12px;font-family:var(--font-family);
+                    font-weight:600;transition:all .15s;text-align:left;
+                ">
+                    <i class="fas fa-folder" style="font-size:12px;color:var(--accent-color);"></i>
+                    <span id="ba-toggle-label">添加到分组</span>
+                    <span id="ba-toggle-arrow" style="margin-left:auto;font-size:10px;transition:transform .2s;">▼</span>
+                </button>
+                <div id="ba-group-drawer" style="display:none;overflow-x:auto;overflow-y:hidden;padding:10px 2px 4px;scrollbar-width:none;-webkit-overflow-scrolling:touch;">
+                    <div id="ba-group-list" style="display:flex;gap:7px;width:max-content;">
+                        ${groupPillsHTML}
+                    </div>
+                </div>
+            </div>` : ''}
+        </div>
+
+        <div style="flex-shrink:0;padding-top:14px;display:flex;gap:10px;">
             <button id="ba-cancel" style="flex:1;padding:12px;border:1.5px solid var(--border-color);border-radius:13px;background:none;color:var(--text-secondary);font-size:13px;cursor:pointer;font-family:var(--font-family);">取消</button>
             <button id="ba-confirm" style="flex:2;padding:12px;border:none;border-radius:13px;background:var(--accent-color);color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font-family);">添加</button>
         </div>
@@ -1702,15 +2074,44 @@ function _showBatchAddDialog() {
     ta.addEventListener('focus', e => { e.target.style.borderColor = 'var(--accent-color)'; });
     ta.addEventListener('blur', e => { e.target.style.borderColor = 'var(--border-color)'; });
 
-    // Group pill selection
-    let _selectedGroupIdx = -1; // -1 = no group
+    const groupToggle = panel.querySelector('#ba-group-toggle');
+    const groupDrawer = panel.querySelector('#ba-group-drawer');
+    const toggleArrow = panel.querySelector('#ba-toggle-arrow');
+    const toggleLabel = panel.querySelector('#ba-toggle-label');
+    let _drawerOpen = false;
+    if (groupToggle && groupDrawer) {
+        groupToggle.addEventListener('click', () => {
+            _drawerOpen = !_drawerOpen;
+            if (_drawerOpen) {
+                groupDrawer.style.display = 'block';
+                groupDrawer.style.animation = 'baGroupSlide 0.18s ease forwards';
+                toggleArrow.style.transform = 'rotate(180deg)';
+                groupToggle.style.borderColor = 'var(--accent-color)';
+                groupToggle.style.color = 'var(--text-primary)';
+            } else {
+                groupDrawer.style.display = 'none';
+                toggleArrow.style.transform = '';
+                groupToggle.style.borderColor = 'var(--border-color)';
+                groupToggle.style.color = 'var(--text-secondary)';
+            }
+        });
+    }
+
+    let _selectedGroupIdx = -1; 
     const pillContainer = panel.querySelector('#ba-group-list');
     if (pillContainer) {
         pillContainer.addEventListener('click', e => {
             const pill = e.target.closest('.ba-grp-pill');
             if (!pill) return;
             _selectedGroupIdx = parseInt(pill.dataset.gidx);
-            // Update pill styles
+            if (toggleLabel) {
+                if (_selectedGroupIdx === -1) {
+                    toggleLabel.textContent = '添加到分组';
+                } else {
+                    const g = groups[_selectedGroupIdx];
+                    toggleLabel.textContent = g ? `分组：${g.name}` : '添加到分组';
+                }
+            }
             pillContainer.querySelectorAll('.ba-grp-pill').forEach((p, i) => {
                 const gidx = parseInt(p.dataset.gidx);
                 if (gidx === -1) {
@@ -1719,7 +2120,7 @@ function _showBatchAddDialog() {
                     p.style.color = isActive ? '#fff' : 'var(--text-secondary)';
                     p.style.borderColor = isActive ? 'var(--accent-color)' : 'var(--border-color)';
                 } else {
-                    const g = customReplyGroups[gidx];
+                    const g = groups[gidx];
                     if (!g) return;
                     const isActive = _selectedGroupIdx === gidx;
                     p.style.background = isActive ? g.color : g.color + '18';
@@ -1741,17 +2142,20 @@ function _showBatchAddDialog() {
             const norm = normalizeStringStrict(val);
             const isDup = currentSubTab === 'custom'
                 ? (customReplies.some(r => normalizeStringStrict(r) === norm) || CONSTANTS.REPLY_MESSAGES.some(r => normalizeStringStrict(r) === norm))
+                : currentSubTab === 'pokes'
+                ? customPokes.some(r => normalizeStringStrict(r) === norm)
+                : currentSubTab === 'statuses'
+                ? customStatuses.some(r => normalizeStringStrict(r) === norm)
                 : false;
             if (isDup) { skipped++; return; }
             if (currentSubTab === 'custom') { customReplies.push(val); newItems.push(val); }
-            else if (currentSubTab === 'pokes') customPokes.push(val);
-            else if (currentSubTab === 'statuses') customStatuses.push(val);
+            else if (currentSubTab === 'pokes') { customPokes.push(val); newItems.push(val); }
+            else if (currentSubTab === 'statuses') { customStatuses.push(val); newItems.push(val); }
             else if (currentSubTab === 'mottos') customMottos.push(val);
             added++;
         });
-        // Assign newly added items to selected group
-        if (currentSubTab === 'custom' && _selectedGroupIdx >= 0 && newItems.length > 0 && customReplyGroups) {
-            const targetGroup = customReplyGroups[_selectedGroupIdx];
+        if (_selectedGroupIdx >= 0 && newItems.length > 0 && groups) {
+            const targetGroup = groups[_selectedGroupIdx];
             if (targetGroup) {
                 if (!targetGroup.items) targetGroup.items = [];
                 newItems.forEach(item => {
@@ -1762,8 +2166,8 @@ function _showBatchAddDialog() {
         throttledSaveData();
         overlay.remove();
         renderReplyLibrary();
-        const groupHint = _selectedGroupIdx >= 0 && customReplyGroups?.[_selectedGroupIdx]
-            ? `，已加入「${customReplyGroups[_selectedGroupIdx].name}」` : '';
+        const groupHint = _selectedGroupIdx >= 0 && groups?.[_selectedGroupIdx]
+            ? `，已加入「${groups[_selectedGroupIdx].name}」` : '';
         showNotification(`✓ 添加 ${added} 条${skipped ? `，跳过 ${skipped} 条重复` : ''}${groupHint}`, 'success');
     };
 }
@@ -1780,6 +2184,17 @@ function initReplyLibraryListeners() {
             _searchVisible = false;
             _searchQuery = '';
             _activeGroupFilter = null;
+            // 确保公告面板隐藏、列表区域显示
+            const annPanel = document.getElementById('announcement-panel');
+            const listArea = document.getElementById('custom-replies-list');
+            const subTabs  = document.getElementById('cr-sub-tabs');
+            const addBtn2  = document.getElementById('add-custom-reply');
+            const batchTb  = document.getElementById('batch-ops-toolbar');
+            if (annPanel)  annPanel.style.display = 'none';
+            if (listArea)  listArea.style.display = '';
+            if (subTabs)   subTabs.style.display = '';
+            if (addBtn2)   addBtn2.style.display = '';
+            if (batchTb)   batchTb.style.display = '';
             document.querySelectorAll('.sidebar-btn').forEach(b => {
                 b.classList.toggle('active', b.dataset.major === 'reply');
             });
@@ -1794,7 +2209,11 @@ function initReplyLibraryListeners() {
             btn.classList.add('active');
             currentMajorTab = btn.dataset.major;
 
-            if (currentMajorTab === 'announcement') return;
+            if (currentMajorTab === 'announcement') {
+                // switchToAnnouncementPanel 内部已处理所有清理，这里不重复操作
+                if (typeof window.switchToAnnouncementPanel === 'function') window.switchToAnnouncementPanel();
+                return;
+            }
 
             const listArea = document.getElementById('custom-replies-list');
             const annPanel = document.getElementById('announcement-panel');
@@ -1879,7 +2298,7 @@ function initReplyLibraryListeners() {
                 }
                 return;
             }
-            if (currentSubTab === 'custom') {
+            if (currentSubTab === 'custom' || currentSubTab === 'pokes' || currentSubTab === 'statuses') {
                 _showBatchAddDialog(); return;
             }
             let input;
@@ -1957,11 +2376,9 @@ function applyAvatarFrame(avatarContainer, frameSettings) {
         frameElement.style.width = `${frameSettings.size || 100}%`;
         frameElement.style.height = `${frameSettings.size || 100}%`;
         frameElement.style.transform = `translate(calc(-50% + ${frameSettings.offsetX || 0}px), calc(-50% + ${frameSettings.offsetY || 0}px))`;
-        // Override overflow:hidden !important from shape classes so the frame is not clipped
         avatarContainer.style.setProperty('overflow', 'visible', 'important');
     } else {
         frameElement?.remove();
-        // Restore overflow management to CSS shape classes
         avatarContainer.style.removeProperty('overflow');
     }
 }
@@ -2029,7 +2446,6 @@ function setupAvatarFrameSettings() {
             reader.readAsDataURL(file);
         });
 
-        // URL import button
         const urlBtn = document.getElementById(`${type}-frame-url-btn-2`);
         if (urlBtn) {
             urlBtn.addEventListener('click', () => {
